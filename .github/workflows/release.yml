@@ -1,0 +1,207 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write       # for creating GitHub Releases
+  id-token: write       # for PyPI trusted publishing (OIDC)
+
+jobs:
+  # ── Build both packages ──────────────────────────────
+  build:
+    name: Build packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed for hatch-vcs
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build tools
+        run: uv pip install --system build hatch hatchling hatch-vcs
+
+      - name: Build agent-jupyter-toolkit
+        working-directory: packages/agent-jupyter-toolkit
+        run: python -m build
+
+      - name: Build mcp-jupyter-notebook
+        working-directory: packages/mcp-jupyter-notebook
+        run: python -m build
+
+      - name: Upload toolkit artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-toolkit
+          path: packages/agent-jupyter-toolkit/dist/
+
+      - name: Upload mcp artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-mcp
+          path: packages/mcp-jupyter-notebook/dist/
+
+  # ── Run tests before publishing ──────────────────────
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-packages --dev
+
+      - name: Test agent-jupyter-toolkit
+        working-directory: packages/agent-jupyter-toolkit
+        run: uv run pytest --tb=short -q
+
+      - name: Test mcp-jupyter-notebook
+        working-directory: packages/mcp-jupyter-notebook
+        run: uv run pytest --tb=short -q
+
+  # ── Publish agent-jupyter-toolkit to PyPI ────────────
+  publish-toolkit:
+    name: Publish agent-jupyter-toolkit
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/agent-jupyter-toolkit/
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-toolkit
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+        # Uses OIDC trusted publishing — no API token needed.
+        # Configure at: https://pypi.org/manage/project/agent-jupyter-toolkit/settings/publishing/
+
+  # ── Publish mcp-jupyter-notebook to PyPI ─────────────
+  publish-mcp:
+    name: Publish mcp-jupyter-notebook
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-jupyter-notebook/
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-mcp
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+        # Uses OIDC trusted publishing — no API token needed.
+        # Configure at: https://pypi.org/manage/project/mcp-jupyter-notebook/settings/publishing/
+
+  # ── Create GitHub Release ────────────────────────────
+  github-release:
+    name: GitHub Release
+    needs: [publish-toolkit, publish-mcp]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+
+  # ── Build & push Docker image ────────────────────────
+  docker:
+    name: Docker (mcp-jupyter-notebook)
+    needs: [publish-mcp]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/mcp-jupyter-notebook
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/mcp-jupyter-notebook
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

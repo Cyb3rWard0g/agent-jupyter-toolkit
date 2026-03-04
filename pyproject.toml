@@ -1,0 +1,67 @@
+[project]
+name = "agent-jupyter-workspace"
+version = "0.0.0"
+description = "Monorepo workspace for agent-jupyter-toolkit and mcp-jupyter-notebook"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11,<3.14"
+authors = [
+  { name = "Roberto Rodriguez", email = "9653181+Cyb3rWard0g@users.noreply.github.com" }
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2",
+  "pytest-asyncio>=1.3.0",
+  "anyio>=4.12.1",
+  "ipykernel",
+  "ruff>=0.14.13",
+  "black",
+  "build",
+  "twine",
+]
+
+# ── uv workspace ────────────────────────────────────────
+[tool.uv]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+agent-jupyter-toolkit = { workspace = true }
+
+# ── shared tool config ──────────────────────────────────
+
+[tool.pytest.ini_options]
+python_files = ["test_*.py"]
+addopts = "-ra"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["packages/*/src", "packages/*/tests"]
+extend-exclude = [".venv", ".tox", "build", "dist", "__pycache__", ".eggs", "repos"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = []
+preview = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent_jupyter_toolkit", "mcp_jupyter_notebook"]
+
+[tool.black]
+target-version = ["py311", "py312", "py313"]
+line-length = 100
+exclude = '''
+/(
+  \.venv
+ | \.tox
+ | build
+ | dist
+ | __pycache__
+ | \.eggs
+ | repos
+)/
+'''

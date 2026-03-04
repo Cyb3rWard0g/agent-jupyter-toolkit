@@ -1,0 +1,11 @@
+# Kernel-side dependencies for the Jupyter image.
+jupyter-collaboration>=4.1.1
+
+ipywidgets
+pandas
+matplotlib
+plotly
+seaborn
+
+# PostgreSQL client support (agent-data-toolkit with psycopg)
+agent-data-toolkit[postgresql]

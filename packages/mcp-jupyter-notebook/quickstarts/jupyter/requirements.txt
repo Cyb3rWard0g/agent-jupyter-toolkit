@@ -1,0 +1,11 @@
+# Kernel-side dependencies for the Jupyter quickstart image.
+# These are installed into the same Python environment used by notebook kernels.
+
+jupyter-collaboration>=4.1.1
+
+pandas
+matplotlib
+networkx
+
+# PostgreSQL client support for postgresql_* tools (optional but common).
+agent-data-toolkit[postgresql]

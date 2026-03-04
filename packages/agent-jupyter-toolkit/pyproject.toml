@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-jupyter-toolkit"
+dynamic = ["version"]
+description = "A toolkit for building, managing, and extending Jupyter agent workflows, including kernel and notebook utilities."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11,<3.14"
+authors = [
+  { name = "Roberto Rodriguez", email = "9653181+Cyb3rWard0g@users.noreply.github.com" }
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+keywords = ["Jupyter", "agents", "kernels", "notebooks", "collaboration", "data"]
+
+dependencies = [
+  "jupyter-client>=8.8.0",
+  "nbformat>=5.10.4",
+  "pandas>=3.0.1",
+  "pyarrow>=23.0.1",
+  "aiohttp>=3.13.3",
+  "yarl>=1.22.0",
+  "pycrdt>=0.12.46",
+  "jupyter-core>=5.9.1",
+  "jupyter-ydoc>=3.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0.2",
+  "pytest-asyncio>=1.3.0",
+  "anyio>=4.12.1",
+  "ipykernel",
+  "ruff>=0.14.13",
+  "black",
+  "build",
+  "twine",
+]
+
+[project.urls]
+Homepage = "https://github.com/Cyb3rWard0g/agent-jupyter-toolkit"
+Repository = "https://github.com/Cyb3rWard0g/agent-jupyter-toolkit"
+Issues = "https://github.com/Cyb3rWard0g/agent-jupyter-toolkit/issues"
+
+[tool.hatch.version]
+source = "vcs"
+raw-options.root = "../.."
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_jupyter_toolkit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
+pythonpath = ["src"]
+asyncio_default_fixture_loop_scope = "function"

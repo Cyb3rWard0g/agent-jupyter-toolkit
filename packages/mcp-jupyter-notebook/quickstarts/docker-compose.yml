@@ -1,0 +1,46 @@
+services:
+  jupyter:
+    build: ./jupyter/
+    container_name: mcp-jupyter-server
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8888:8888"
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-mcp-dev-token}
+      JUPYTER_ENABLE_LAB: "yes"
+      # Optional: only needed when you enable the PostgreSQL tools.
+      # In server mode, this env var must live in the Jupyter container so kernels inherit it.
+      PG_DSN: ${PG_DSN:-}
+    volumes:
+      - ./jupyter/notebooks:/home/jovyan/work
+    command: >
+      start-notebook.py
+      --IdentityProvider.token=${JUPYTER_TOKEN:-mcp-dev-token}
+      --ServerApp.allow_remote_access=True
+      --ServerApp.ip=0.0.0.0
+      --ServerApp.root_dir=/home/jovyan/work
+      --ServerApp.trust_xheaders=True
+
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16
+    container_name: mcp-jupyter-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-demo}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-postgres}", "-d", "${POSTGRES_DB:-demo}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
