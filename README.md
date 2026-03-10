@@ -1,5 +1,10 @@
 # Agent Jupyter Toolkit
 
+[![CI](https://github.com/Cyb3rWard0g/agent-jupyter-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Cyb3rWard0g/agent-jupyter-toolkit/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Cyb3rWard0g/agent-jupyter-toolkit)](https://github.com/Cyb3rWard0g/agent-jupyter-toolkit/releases)
+[![License](https://img.shields.io/github/license/Cyb3rWard0g/agent-jupyter-toolkit)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13-blue)](https://www.python.org/)
+
 ![](docs/Agent-Jupyter-Toolkit-Architecture.png)
 
 An open-source project to provide the right tools for AI agents to execute
@@ -12,10 +17,12 @@ Model Context Protocol (MCP), the project also ships an MCP server that exposes
 these same capabilities as a standardized tool suite, including optional
 PostgreSQL tools for data workflows.
 
-| Package | Description | Install |
-|---------|-------------|---------|
-| [**agent-jupyter-toolkit**](packages/agent-jupyter-toolkit/) | Domain library — async kernel sessions, notebook transports, variable management, MIME serialization | `pip install agent-jupyter-toolkit` or `pip install agent-jupyter-toolkit[dataframe]` for DataFrame serialization |
-| [**mcp-jupyter-notebook**](packages/mcp-jupyter-notebook/) | MCP server — core notebook tools + optional PostgreSQL tools for AI agents | `pip install mcp-jupyter-notebook` or `pip install mcp-jupyter-notebook[dataframe]` |
+## Packages
+
+| Package | PyPI | Description |
+|---------|------|-------------|
+| [**agent-jupyter-toolkit**](packages/agent-jupyter-toolkit/) | [![PyPI version](https://img.shields.io/pypi/v/agent-jupyter-toolkit)](https://pypi.org/project/agent-jupyter-toolkit/) [![Downloads](https://img.shields.io/pypi/dm/agent-jupyter-toolkit)](https://pypi.org/project/agent-jupyter-toolkit/) | Async kernel sessions (local/remote/attach), code execution, notebook transports, cell editing, package management, dependency tracking, variable inspection, and MIME serialization |
+| [**mcp-jupyter-notebook**](packages/mcp-jupyter-notebook/) | [![PyPI version](https://img.shields.io/pypi/v/mcp-jupyter-notebook)](https://pypi.org/project/mcp-jupyter-notebook/) [![Downloads](https://img.shields.io/pypi/dm/mcp-jupyter-notebook)](https://pypi.org/project/mcp-jupyter-notebook/) | MCP server — exposes the toolkit as standardized tools for AI agents, plus additional data tools to connect to databases (e.g. PostgreSQL) |
 
 ## Quick Start
 
