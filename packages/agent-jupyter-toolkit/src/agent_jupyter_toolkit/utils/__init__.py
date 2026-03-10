@@ -31,7 +31,9 @@ from .packages import (
     check_package_availability,
     ensure_packages,
     ensure_packages_with_report,
+    get_package_versions,
     install_package,
+    uninstall_packages,
     update_dependencies,
 )
 
@@ -52,6 +54,8 @@ __all__ = [
     "get_variable_value",
     "ensure_packages",
     "ensure_packages_with_report",
+    "uninstall_packages",
+    "get_package_versions",
     "update_dependencies",
     "install_package",
     "check_package_availability",

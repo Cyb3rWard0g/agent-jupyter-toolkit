@@ -300,6 +300,116 @@ class NotebookDocumentTransport(Protocol):
         """
         ...
 
+    # ---------- cell addressing by ID ----------
+
+    async def resolve_cell_index(self, cell_id: str) -> int:
+        """
+        Return the zero-based index of the cell whose ``id`` matches *cell_id*.
+
+        Allows callers to target cells by their stable identifiers rather than
+        positional indices, which can shift as cells are inserted or deleted.
+
+        The default implementation fetches the full notebook and performs a
+        linear scan.  Transports backed by an indexed data structure (e.g. Yjs
+        CRDT) MAY override this with a more efficient lookup.
+
+        Args:
+            cell_id: The unique cell identifier string (typically a UUID hex).
+
+        Returns:
+            Zero-based index of the matching cell.
+
+        Raises:
+            KeyError: if no cell with the given ID exists.
+        """
+        nb = await self.fetch()
+        cells = nb.get("cells") or []
+        for idx, cell in enumerate(cells):
+            if cell.get("id") == cell_id:
+                return idx
+        raise KeyError(f"No cell with id {cell_id!r}")
+
+    async def get_cell_by_id(self, cell_id: str) -> dict[str, Any]:
+        """
+        Return the cell whose ``id`` matches *cell_id* as an nbformat-like dict.
+
+        This is a convenience method equivalent to::
+
+            index = await self.resolve_cell_index(cell_id)
+            cell  = await self.get_cell(index)
+
+        Transports MAY provide a more efficient implementation.
+
+        Args:
+            cell_id: The unique cell identifier string.
+
+        Returns:
+            Dict with at least ``cell_type``, ``source``, ``metadata``, and,
+            for code cells, ``outputs`` and ``execution_count``.
+
+        Raises:
+            KeyError: if no cell with the given ID exists.
+        """
+        index = await self.resolve_cell_index(cell_id)
+        return await self.get_cell(index)
+
+    # ---------- cell reordering ----------
+
+    async def move_cell(self, from_index: int, to_index: int) -> None:
+        """
+        Move the cell at *from_index* to *to_index*.
+
+        The cell is removed from its current position and re-inserted so that
+        it occupies *to_index* in the resulting list.  All other cells shift
+        accordingly.
+
+        Implementations that operate on a CRDT (e.g. Yjs) SHOULD perform
+        the move inside a single transaction so collaborators see an atomic
+        reorder instead of a delete followed by an insert.
+
+        Args:
+            from_index: Current zero-based position of the cell to move.
+            to_index:   Desired zero-based position after the move.
+
+        Raises:
+            IndexError: if either index is out of range ``[0..len-1]``.
+        """
+        ...
+
+    # ---------- notebook-level metadata ----------
+
+    async def get_metadata(self) -> dict[str, Any]:
+        """
+        Return the notebook-level metadata dict.
+
+        This is the ``metadata`` key at the top level of the nbformat model,
+        **not** per-cell metadata.  Typical contents include ``kernelspec``,
+        ``language_info``, and custom keys set by tools or extensions.
+
+        Returns:
+            A (shallow-copied) dict of the notebook metadata.
+        """
+        nb = await self.fetch()
+        return dict(nb.get("metadata") or {})
+
+    async def update_metadata(self, updates: dict[str, Any]) -> None:
+        """
+        Merge *updates* into the notebook-level metadata.
+
+        Semantics are a **shallow merge**: top-level keys in *updates*
+        overwrite existing keys; keys not mentioned are left untouched.
+        To delete a key, set it to ``None`` and have the implementation
+        strip ``None``-valued keys (or simply overwrite).
+
+        Args:
+            updates: Mapping of keys to merge into ``notebook["metadata"]``.
+
+        Raises:
+            RuntimeError: on IO/network errors.
+            TypeError: if *updates* is not a dict.
+        """
+        ...
+
     def on_change(self, cb: Callable[[dict[str, Any]], None]) -> None:
         """
         Register a callback to be invoked after a save or cell mutation.

@@ -235,6 +235,129 @@ async def update_dependencies(session, packages: list[str], timeout: float = 120
     return ok_all
 
 
+async def uninstall_packages(
+    session, packages: list[str], timeout: float = 120.0
+) -> dict[str, Any]:
+    """
+    Uninstall pip packages from the kernel environment.
+
+    Args:
+        session: Kernel session object
+        packages: pip distribution names to uninstall
+        timeout: seconds to wait for kernel execution
+
+    Returns:
+        {
+          "success": bool,
+          "report": {
+            "<pkg>": {
+              "pip": "<pkg>",
+              "was_installed": bool,
+              "uninstalled": bool,
+              "error": str|None,
+              "pip_returncode": int|None,
+              "pip_stderr": str
+            }, ...
+          }
+        }
+    """
+    code = f"""
+import sys, subprocess, json, shutil
+import importlib.metadata as _im
+
+PKGS = {packages!r}
+
+def base_name(name: str) -> str:
+    i = name.find('[')
+    return name if i < 0 else name[:i]
+
+def is_installed(pip_name: str) -> bool:
+    dist = base_name(pip_name)
+    try:
+        _im.version(dist)
+        return True
+    except _im.PackageNotFoundError:
+        return False
+
+def _uninstall_cmd(pip_name: str) -> list[str]:
+    uv = shutil.which("uv")
+    if uv:
+        return [uv, "pip", "uninstall", pip_name]
+    return [sys.executable, "-m", "pip", "uninstall", pip_name, "-y"]
+
+rep = {{}}
+for pip_name in PKGS:
+    entry = {{
+        "pip": pip_name,
+        "was_installed": False,
+        "uninstalled": False,
+        "error": None,
+        "pip_returncode": None,
+        "pip_stderr": "",
+    }}
+
+    if not is_installed(pip_name):
+        entry["uninstalled"] = True  # already not present
+        rep[pip_name] = entry
+        continue
+
+    entry["was_installed"] = True
+    try:
+        cmd = _uninstall_cmd(pip_name)
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        entry["pip_returncode"] = res.returncode
+        entry["pip_stderr"] = res.stderr or ""
+        if res.returncode == 0 and not is_installed(pip_name):
+            entry["uninstalled"] = True
+        else:
+            entry["error"] = f"uninstall exit code {{res.returncode}}"
+    except Exception as e:
+        entry["error"] = str(e)
+
+    rep[pip_name] = entry
+
+ok = all(v["uninstalled"] or not v["was_installed"] for v in rep.values())
+print(json.dumps({{"success": ok, "report": rep}}))
+"""
+    return await _run_json(session, code, timeout=timeout)
+
+
+async def get_package_versions(
+    session, packages: list[str], timeout: float = 60.0
+) -> dict[str, str | None]:
+    """
+    Query installed version strings for the given packages.
+
+    Args:
+        session: Kernel session object
+        packages: pip distribution names to query
+
+    Returns:
+        { "pkg": "1.2.3" | None, ... }
+    """
+    code = f"""
+import importlib.metadata as _im
+import json
+
+PKGS = {packages!r}
+
+def base_name(name: str) -> str:
+    i = name.find('[')
+    return name if i < 0 else name[:i]
+
+versions = {{}}
+for p in PKGS:
+    dist = base_name(p)
+    try:
+        versions[p] = _im.version(dist)
+    except _im.PackageNotFoundError:
+        versions[p] = None
+
+print(json.dumps(versions))
+"""
+    return await _run_json(session, code, timeout=timeout)
+
+
 # Common package sets for convenience (unchanged)
 SCIENTIFIC_PACKAGES = ["numpy", "scipy", "matplotlib", "pandas"]
 ML_PACKAGES = ["scikit-learn", "tensorflow", "torch", "transformers"]

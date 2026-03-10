@@ -19,7 +19,12 @@ from .cells import create_code_cell, create_markdown_cell
 from .factory import make_document_transport
 from .session import NotebookSession
 from .transport import NotebookDocumentTransport
-from .types import NotebookCodeExecutionResult, NotebookMarkdownCellResult
+from .types import (
+    CellRunResult,
+    NotebookCodeExecutionResult,
+    NotebookMarkdownCellResult,
+    RunAllResult,
+)
 
 __all__ = [
     "make_document_transport",
@@ -30,5 +35,7 @@ __all__ = [
     "create_markdown_cell",
     "NotebookCodeExecutionResult",
     "NotebookMarkdownCellResult",
+    "CellRunResult",
+    "RunAllResult",
     "utils",
 ]

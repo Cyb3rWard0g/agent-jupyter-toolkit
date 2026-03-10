@@ -72,6 +72,21 @@ class KernelTransport:
 
     # ── Introspection / control ──────────────────────────────────────────
 
+    async def restart(self) -> None:
+        """
+        Restart the kernel, preserving the connection.
+
+        After restart the kernel has a fresh namespace but the transport
+        remains usable — callers do **not** need to call ``start()`` again.
+
+        For local kernels this restarts the OS process; for remote kernels
+        this issues a ``POST /api/kernels/{id}/restart`` request.
+
+        Raises:
+            RuntimeError: If the transport is not started or the restart fails.
+        """
+        raise NotImplementedError
+
     async def interrupt(self) -> None:
         """
         Interrupt the currently running execution in the kernel.

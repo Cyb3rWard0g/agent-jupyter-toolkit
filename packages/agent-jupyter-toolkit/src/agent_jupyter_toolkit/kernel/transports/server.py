@@ -430,6 +430,23 @@ class ServerTransport(KernelTransport):
 
     # ── Introspection / control ──────────────────────────────────────────
 
+    async def restart(self) -> None:
+        """Restart the remote kernel via the REST API.
+
+        Issues ``POST /api/kernels/{kernel_id}/restart`` and waits for the
+        server to confirm.  The existing kernel ID and WebSocket connection
+        are preserved so the transport remains usable immediately.
+
+        Raises:
+            RuntimeError: If the transport is not started or the server
+                returns an error status.
+        """
+        if not (self._session and self._kernel_id):
+            raise RuntimeError("ServerTransport not started. Call start() first.")
+        async with self._session.post(f"{self._base}/api/kernels/{self._kernel_id}/restart") as r:
+            r.raise_for_status()
+        logger.info("Kernel restarted (kernel_id=%s)", self._kernel_id)
+
     async def interrupt(self) -> None:
         """Interrupt the running kernel via the REST API."""
         if not (self._session and self._kernel_id):

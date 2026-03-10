@@ -4,11 +4,13 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from ..kernel import ExecutionResult
 from ..kernel import Session as KernelSession
 from .transport import NotebookDocumentTransport
+from .types import CellRunResult, RunAllResult
 from .utils import to_nbformat_outputs
 
 logger = logging.getLogger(__name__)
@@ -317,19 +319,7 @@ class NotebookSession:
         """
         logger.debug(f"[append_and_run] Appending code cell: {code!r}")
 
-        # Use same smart startup logic as execute_notebook_cell to avoid race conditions
-        if not self._started:
-            kernel_alive = await self.kernel.is_alive()
-            doc_connected = await self.doc.is_connected()
-
-            if kernel_alive and doc_connected:
-                # Components already started individually, just mark session as started
-                logger.debug("Components already started individually, marking session as started")
-                self._started = True
-            else:
-                # Normal startup flow
-                logger.debug("Starting session with normal startup flow")
-                await self.start()
+        await self._ensure_started()
 
         # Create the cell first so we have a stable index to update
         idx = await self.doc.append_code_cell(code, metadata=metadata)
@@ -374,19 +364,7 @@ class NotebookSession:
                 print("Cell updated and executed successfully")
             ```
         """
-        # Use same smart startup logic as execute_notebook_cell to avoid race conditions
-        if not self._started:
-            kernel_alive = await self.kernel.is_alive()
-            doc_connected = await self.doc.is_connected()
-
-            if kernel_alive and doc_connected:
-                # Components already started individually, just mark session as started
-                logger.debug("Components already started individually, marking session as started")
-                self._started = True
-            else:
-                # Normal startup flow
-                logger.debug("Starting session with normal startup flow")
-                await self.start()
+        await self._ensure_started()
 
         # Guard: only allow overwriting code cells, not markdown cells
         cell = await self.doc.get_cell(index)
@@ -420,19 +398,7 @@ class NotebookSession:
             print(f"Added markdown cell at index {idx}")
             ```
         """
-        # Use same smart startup logic as execute_notebook_cell to avoid race conditions
-        if not self._started:
-            kernel_alive = await self.kernel.is_alive()
-            doc_connected = await self.doc.is_connected()
-
-            if kernel_alive and doc_connected:
-                # Components already started individually, just mark session as started
-                logger.debug("Components already started individually, marking session as started")
-                self._started = True
-            else:
-                # Normal startup flow
-                logger.debug("Starting session with normal startup flow")
-                await self.start()
+        await self._ensure_started()
 
         if index is None:
             result_index = await self.doc.append_markdown_cell(text)
@@ -441,3 +407,349 @@ class NotebookSession:
             result_index = index
 
         return result_index
+
+    # --------------------------------------------------------------------- run-all
+
+    async def run_all(
+        self,
+        *,
+        stop_on_error: bool = True,
+        timeout: float | None = None,
+    ) -> RunAllResult:
+        """
+        Execute every code cell in the notebook sequentially.
+
+        Iterates over all cells in document order, marks non-code and
+        empty-source cells as skipped, and executes each remaining code cell
+        via the kernel with real-time output streaming. Results are collected
+        in notebook order so callers can inspect individual outcomes.
+
+        This is useful as a **verification pass** — for example after a
+        series of incremental edits an agent can ``run_all()`` to confirm
+        the notebook still executes cleanly from top to bottom.
+
+        Args:
+            stop_on_error: If ``True`` (default), execution halts at the
+                first cell that produces an error status.  If ``False``,
+                all code cells are executed regardless of earlier failures.
+            timeout: Per-cell execution timeout in seconds.  ``None`` means
+                no timeout (the kernel decides when the cell is done).
+
+        Returns:
+            RunAllResult: Aggregate result with per-cell breakdown.
+
+        Example:
+            ```python
+            result = await session.run_all()
+            if result.status == "ok":
+                print(f"All {result.executed_count} cells passed")
+            else:
+                print(f"Failed at cell {result.first_failure.index}")
+            ```
+        """
+        import time as _time
+
+        await self._ensure_started()
+
+        total_start = _time.monotonic()
+        cell_results: list[CellRunResult] = []
+        executed = 0
+        skipped = 0
+        overall = "ok"
+        failed: CellRunResult | None = None
+
+        notebook = await self.doc.fetch()
+        cells = notebook.get("cells") or []
+        if not isinstance(cells, list):
+            cells = []
+
+        for idx, cell in enumerate(cells):
+            cell_type = cell.get("cell_type", "")
+            raw_source = cell.get("source", "")
+            if isinstance(raw_source, list):
+                source = "".join(str(part) for part in raw_source)
+            else:
+                source = str(raw_source)
+            cell_id = cell.get("id")
+            preview = source[:100]
+
+            if cell_type != "code":
+                skipped += 1
+                cell_results.append(
+                    CellRunResult(
+                        index=idx,
+                        cell_id=cell_id,
+                        status="skipped",
+                        source_snippet=preview,
+                    )
+                )
+                continue
+
+            if not source.strip():
+                skipped += 1
+                cell_results.append(
+                    CellRunResult(
+                        index=idx,
+                        cell_id=cell_id,
+                        status="skipped",
+                        source_snippet=preview,
+                    )
+                )
+                continue
+
+            # Execute
+            executed += 1
+            cell_start = _time.monotonic()
+            try:
+                result = await self._execute_with_streaming(source, idx, timeout)
+                elapsed = _time.monotonic() - cell_start
+
+                cr = CellRunResult(
+                    index=idx,
+                    cell_id=cell_id,
+                    status=result.status,
+                    source_snippet=preview,
+                    execution_count=result.execution_count,
+                    elapsed_seconds=elapsed,
+                )
+
+                if result.status != "ok":
+                    cr.error_message = result.stderr or "execution error"
+                    overall = "error"
+                    if failed is None:
+                        failed = cr
+
+                cell_results.append(cr)
+
+                if result.status != "ok" and stop_on_error:
+                    break
+
+            except Exception as exc:
+                elapsed = _time.monotonic() - cell_start
+                cr = CellRunResult(
+                    index=idx,
+                    cell_id=cell_id,
+                    status="error",
+                    source_snippet=preview,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                    elapsed_seconds=elapsed,
+                )
+                cell_results.append(cr)
+                overall = "error"
+                if failed is None:
+                    failed = cr
+                if stop_on_error:
+                    break
+
+        total_elapsed = _time.monotonic() - total_start
+
+        return RunAllResult(
+            status=overall,
+            executed_count=executed,
+            skipped_count=skipped,
+            cells=cell_results,
+            first_failure=failed,
+            elapsed_seconds=total_elapsed,
+        )
+
+    async def restart_and_run_all(
+        self,
+        *,
+        stop_on_error: bool = True,
+        timeout: float | None = None,
+    ) -> RunAllResult:
+        """
+        Restart the kernel and then execute every code cell sequentially.
+
+        Combines :pymeth:`kernel.restart` with :pymeth:`run_all` into a
+        single atomic verification workflow.  After the restart the kernel
+        has a clean namespace, so this is the most rigorous way to confirm a
+        notebook is reproducible from scratch.
+
+        Args:
+            stop_on_error: If ``True`` (default), execution halts at the
+                first cell that produces an error status.
+            timeout: Per-cell execution timeout in seconds.
+
+        Returns:
+            RunAllResult: Same structure as ``run_all()``.
+
+        Example:
+            ```python
+            result = await session.restart_and_run_all()
+            if result.status == "ok":
+                print("Notebook is fully reproducible!")
+            ```
+        """
+        await self._ensure_started()
+        await self.kernel.restart()
+        return await self.run_all(stop_on_error=stop_on_error, timeout=timeout)
+
+    async def fresh_run_all(
+        self,
+        *,
+        stop_on_error: bool = True,
+        timeout: float | None = None,
+    ) -> RunAllResult:
+        """Backward-compatible alias for :pymeth:`restart_and_run_all`."""
+        return await self.restart_and_run_all(
+            stop_on_error=stop_on_error,
+            timeout=timeout,
+        )
+
+    # --------------------------------------------------------------------- helpers
+
+    async def _ensure_started(self) -> None:
+        """Start the session if not already started (idempotent)."""
+        if not self._started:
+            kernel_alive = await self.kernel.is_alive()
+            doc_connected = await self.doc.is_connected()
+
+            if kernel_alive and doc_connected:
+                logger.debug("Components already started individually, marking session as started")
+                self._started = True
+            else:
+                logger.debug("Starting session with normal startup flow")
+                await self.start()
+
+    # ------------------------------------------------------------ dependency tracking
+
+    #: Metadata key under which agent-installed dependencies are recorded.
+    DEPS_META_KEY: str = "agent_dependencies"
+
+    async def install_packages(
+        self,
+        packages: list[str],
+        *,
+        track: bool = True,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """
+        Install packages into the kernel and optionally track them in notebook metadata.
+
+        This is the **recommended** high-level API that combines kernel-level
+        installation (via pip/uv) with notebook-level dependency tracking.
+        After a successful install the package names and resolved versions
+        are recorded under ``notebook.metadata.agent_dependencies`` so the
+        notebook becomes self-documenting and reproducible.
+
+        Args:
+            packages: pip distribution names to install (e.g. ``["pandas", "plotly"]``).
+            track: If True (default), record successfully installed packages in
+                   notebook metadata.
+            timeout: Per-operation timeout in seconds.
+
+        Returns:
+            The same ``{"success": bool, "report": {...}}`` dict returned by
+            :func:`~agent_jupyter_toolkit.utils.packages.ensure_packages_with_report`,
+            augmented with a ``"tracked"`` key listing what was written to metadata.
+        """
+        from ..utils.packages import ensure_packages_with_report
+
+        await self._ensure_started()
+
+        report = await ensure_packages_with_report(self.kernel, packages, timeout=timeout)
+
+        tracked: list[str] = []
+        if track and report.get("success"):
+            succeeded = [
+                pkg for pkg, info in (report.get("report") or {}).items() if info.get("success")
+            ]
+            if succeeded:
+                try:
+                    await self._track_dependencies(succeeded, timeout=timeout)
+                    tracked = succeeded
+                except Exception as exc:
+                    logger.warning("Failed to track dependencies in metadata: %s", exc)
+
+        report["tracked"] = tracked
+        return report
+
+    async def uninstall_packages(
+        self,
+        packages: list[str],
+        *,
+        untrack: bool = True,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """
+        Uninstall packages from the kernel and remove them from notebook metadata.
+
+        Args:
+            packages: pip distribution names to uninstall.
+            untrack: If True (default), remove uninstalled packages from
+                     ``notebook.metadata.agent_dependencies``.
+            timeout: Per-operation timeout in seconds.
+
+        Returns:
+            ``{"success": bool, "report": {...}}`` from the kernel uninstall,
+            augmented with ``"untracked"`` listing packages removed from metadata.
+        """
+        from ..utils.packages import uninstall_packages as _uninstall_packages
+
+        await self._ensure_started()
+
+        report = await _uninstall_packages(self.kernel, packages, timeout=timeout)
+
+        untracked: list[str] = []
+        if untrack:
+            removed = [
+                pkg for pkg, info in (report.get("report") or {}).items() if info.get("uninstalled")
+            ]
+            if removed:
+                try:
+                    await self._untrack_dependencies(removed)
+                    untracked = removed
+                except Exception as exc:
+                    logger.warning("Failed to untrack dependencies from metadata: %s", exc)
+
+        report["untracked"] = untracked
+        return report
+
+    async def get_tracked_dependencies(self) -> dict[str, Any]:
+        """
+        Return the dependency manifest stored in notebook metadata.
+
+        Returns:
+            A dict mapping package name → ``{"version": str, "installed_at": str}``,
+            or an empty dict if no dependencies have been tracked yet.
+        """
+        meta = await self.doc.get_metadata()
+        return dict(meta.get(self.DEPS_META_KEY) or {})
+
+    async def _track_dependencies(self, packages: list[str], *, timeout: float = 60.0) -> None:
+        """
+        Record *packages* (with resolved versions) in notebook metadata.
+
+        This is an internal helper called after a successful install.
+        """
+        from ..utils.packages import get_package_versions
+
+        versions = await get_package_versions(self.kernel, packages, timeout=timeout)
+        now = datetime.now(UTC).isoformat()
+
+        existing = await self.get_tracked_dependencies()
+        for pkg in packages:
+            existing[pkg] = {
+                "version": versions.get(pkg),
+                "installed_at": now,
+            }
+
+        await self.doc.update_metadata({self.DEPS_META_KEY: existing})
+        logger.info(
+            "Tracked %d dependencies in notebook metadata: %s",
+            len(packages),
+            packages,
+        )
+
+    async def _untrack_dependencies(self, packages: list[str]) -> None:
+        """Remove *packages* from the dependency manifest in metadata."""
+        existing = await self.get_tracked_dependencies()
+        changed = False
+        for pkg in packages:
+            if pkg in existing:
+                del existing[pkg]
+                changed = True
+        if changed:
+            await self.doc.update_metadata({self.DEPS_META_KEY: existing})
+            logger.info("Untracked packages from notebook metadata: %s", packages)

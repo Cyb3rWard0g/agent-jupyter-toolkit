@@ -651,6 +651,83 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
             await self._wait_for_sync_completion()
         self._notify({"op": "cells-mutated", "kind": "delete", "index": index})
 
+    # ---------- cell addressing by ID ----------
+
+    async def resolve_cell_index(self, cell_id: str) -> int:
+        """Return the zero-based index of the cell matching *cell_id*.
+
+        Performs a linear scan over the CRDT ``ycells`` array, which is
+        cheaper than serialising the whole notebook.
+
+        Raises:
+            KeyError: if no cell with the given ID exists.
+        """
+        await self._ensure_root()
+        doc = self._doc
+        assert doc is not None
+        assert self._ynb is not None, "YNotebook should always be initialized"
+        with doc.transaction():
+            for idx in range(self._ynb.cell_number):
+                ycell = self._ynb.ycells[idx]
+                if ycell.get("id") == cell_id:
+                    return idx
+        raise KeyError(f"No cell with id {cell_id!r}")
+
+    async def get_cell_by_id(self, cell_id: str) -> dict[str, Any]:
+        """Return the cell whose ``id`` matches *cell_id*.
+
+        Raises:
+            KeyError: if no cell with the given ID exists.
+        """
+        await self._ensure_root()
+        doc = self._doc
+        assert doc is not None
+        assert self._ynb is not None, "YNotebook should always be initialized"
+        with doc.transaction():
+            for idx in range(self._ynb.cell_number):
+                ycell = self._ynb.ycells[idx]
+                if ycell.get("id") == cell_id:
+                    return self._ynb.get_cell(idx)
+        raise KeyError(f"No cell with id {cell_id!r}")
+
+    # ---------- cell reordering ----------
+
+    async def move_cell(self, from_index: int, to_index: int) -> None:
+        """Move the cell at *from_index* to *to_index* inside the CRDT.
+
+        The move is performed within a single Yjs transaction so
+        collaborators see an atomic reorder rather than a delete + insert.
+
+        Raises:
+            IndexError: if either index is out of range ``[0..len-1]``.
+        """
+        await self._ensure_root()
+        async with self._op_lock:
+            doc = self._doc
+            assert doc is not None
+            assert self._ynb is not None, "YNotebook should always be initialized"
+            with doc.transaction():
+                cells = self._ynb.ycells
+                n = len(cells) if isinstance(cells, pycrdt.Array) else 0
+                if from_index < 0 or from_index >= n:
+                    raise IndexError(f"move_cell: from_index {from_index} out of range 0..{n - 1}")
+                if to_index < 0 or to_index >= n:
+                    raise IndexError(f"move_cell: to_index {to_index} out of range 0..{n - 1}")
+                if from_index != to_index:
+                    cell = cells.pop(from_index)
+                    cells.insert(to_index, cell)
+            await self._broadcast_update()
+            await self._wait_for_sync_completion()
+        self._notify(
+            {
+                "op": "cells-mutated",
+                "kind": "move",
+                "index": to_index,
+                "from": from_index,
+                "to": to_index,
+            }
+        )
+
     async def _validate_cell_index(self, index: int, operation: str) -> bool:
         await self._ensure_root()
         try:

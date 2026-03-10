@@ -103,6 +103,44 @@ async def test_local_get_cell_negative_index(tmp_path):
         await doc.get_cell(-1)
 
 
+async def test_local_cell_id_reads_and_move(tmp_path):
+    doc = make_document_transport(
+        mode="local",
+        local_path=str(tmp_path / "move.ipynb"),
+        remote_base=None,
+        remote_path=None,
+        token=None,
+        headers_json=None,
+        create_if_missing=True,
+    )
+    await doc.start()
+
+    await doc.append_code_cell("a = 1")
+    await doc.append_markdown_cell("# middle")
+    await doc.append_code_cell("b = 2")
+
+    middle = await doc.get_cell(1)
+    middle_id = middle["id"]
+
+    assert await doc.resolve_cell_index(middle_id) == 1
+    assert (await doc.get_cell_by_id(middle_id))["source"] == "# middle"
+
+    events: list[dict] = []
+    doc.on_change(events.append)
+    await doc.move_cell(0, 2)
+
+    assert await doc.get_cell_source(0) == "# middle"
+    assert await doc.get_cell_source(1) == "b = 2"
+    assert await doc.get_cell_source(2) == "a = 1"
+    assert events[-1] == {
+        "op": "cells-mutated",
+        "kind": "move",
+        "index": 2,
+        "from": 0,
+        "to": 2,
+    }
+
+
 # ── NotebookSession (end-to-end with local transport) ─
 
 
@@ -159,3 +197,12 @@ async def test_noop_doc_cell_reads():
 
     with pytest.raises(IndexError):
         await doc.get_cell_source(0)
+
+    with pytest.raises(KeyError):
+        await doc.resolve_cell_index("missing")
+
+    with pytest.raises(KeyError):
+        await doc.get_cell_by_id("missing")
+
+    with pytest.raises(IndexError):
+        await doc.move_cell(0, 1)

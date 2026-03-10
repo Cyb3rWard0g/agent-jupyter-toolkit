@@ -364,6 +364,86 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
         for cb in self._on_change:
             cb({"op": "cells-mutated", "kind": "delete", "index": index})
 
+    # ---------- cell addressing by ID ----------
+
+    async def get_metadata(self) -> dict[str, Any]:
+        """Return a copy of the notebook-level metadata dict."""
+        async with self._lock:
+            nb = self._load_nb()
+            meta = nb.get("metadata", {})
+            return json.loads(json.dumps(dict(meta)))
+
+    async def update_metadata(self, updates: dict[str, Any]) -> None:
+        """Shallow-merge *updates* into notebook-level metadata and persist."""
+        if not isinstance(updates, dict):
+            raise TypeError("update_metadata: 'updates' must be a dict")
+        async with self._lock:
+            nb = self._load_nb()
+            nb["metadata"].update(updates)
+            await self._queue_write(nb)
+        for cb in self._on_change:
+            cb({"op": "metadata-updated", "keys": list(updates.keys())})
+
+    async def resolve_cell_index(self, cell_id: str) -> int:
+        """Return the zero-based index of the cell matching *cell_id*.
+
+        Raises:
+            KeyError: if no cell with the given ID exists.
+        """
+        async with self._lock:
+            nb = self._load_nb()
+            for idx, cell in enumerate(nb.cells):
+                if cell.get("id") == cell_id:
+                    return idx
+        raise KeyError(f"No cell with id {cell_id!r}")
+
+    async def get_cell_by_id(self, cell_id: str) -> dict[str, Any]:
+        """Return the cell whose ``id`` matches *cell_id* as a plain dict.
+
+        Raises:
+            KeyError: if no cell with the given ID exists.
+        """
+        async with self._lock:
+            nb = self._load_nb()
+            for cell in nb.cells:
+                if cell.get("id") == cell_id:
+                    return json.loads(json.dumps(dict(cell)))
+        raise KeyError(f"No cell with id {cell_id!r}")
+
+    # ---------- cell reordering ----------
+
+    async def move_cell(self, from_index: int, to_index: int) -> None:
+        """Move the cell at *from_index* to *to_index*.
+
+        The cell is removed from its current position and re-inserted so that
+        it occupies *to_index* in the resulting list.
+
+        Raises:
+            IndexError: if either index is out of range ``[0..len-1]``.
+        """
+        async with self._lock:
+            nb = self._load_nb()
+            n = len(nb.cells)
+            if from_index < 0 or from_index >= n:
+                raise IndexError(f"move_cell: from_index {from_index} out of range 0..{n - 1}")
+            if to_index < 0 or to_index >= n:
+                raise IndexError(f"move_cell: to_index {to_index} out of range 0..{n - 1}")
+            if from_index == to_index:
+                return
+            cell = nb.cells.pop(from_index)
+            nb.cells.insert(to_index, cell)
+            await self._queue_write(nb)
+        for cb in self._on_change:
+            cb(
+                {
+                    "op": "cells-mutated",
+                    "kind": "move",
+                    "index": to_index,
+                    "from": from_index,
+                    "to": to_index,
+                }
+            )
+
     def on_change(self, cb: Callable[[dict[str, Any]], None]) -> None:
         """
         Register a callback invoked after `save()` or a cell mutation.

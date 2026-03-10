@@ -199,6 +199,18 @@ def make_document_transport(
             """Delete cell (no-op)."""
             ...
 
+        async def resolve_cell_index(self, cell_id: str) -> int:
+            """No-op transport has no cells."""
+            raise KeyError(f"No cell with id {cell_id!r}")
+
+        async def get_cell_by_id(self, cell_id: str) -> dict[str, Any]:
+            """No-op transport has no cells."""
+            raise KeyError(f"No cell with id {cell_id!r}")
+
+        async def move_cell(self, from_index: int, to_index: int) -> None:
+            """No-op transport has no cells."""
+            raise IndexError("move_cell: notebook is empty")
+
         def on_change(self, callback) -> None:
             """Register change callback (no-op)."""
             ...

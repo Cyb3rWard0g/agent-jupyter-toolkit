@@ -142,6 +142,55 @@ class NotebookBuffer(MutableSequence):
         cell["execution_count"] = execution_count
         self._dirty = True
 
+    # ---------- cell addressing by ID ----------
+
+    def resolve_cell_index(self, cell_id: str) -> int:
+        """Return the zero-based index of the cell matching *cell_id*.
+
+        Unlike the async transport method, this operates on the in-memory
+        buffer synchronously.
+
+        Raises:
+            KeyError: if no cell with the given ID exists in the buffer.
+        """
+        self._ensure_loaded()
+        for idx, cell in enumerate(self._cells):
+            if cell.get("id") == cell_id:
+                return idx
+        raise KeyError(f"No cell with id {cell_id!r}")
+
+    def get_cell_by_id(self, cell_id: str) -> dict[str, Any]:
+        """Return the cell whose ``id`` matches *cell_id*.
+
+        Raises:
+            KeyError: if no cell with the given ID exists in the buffer.
+        """
+        index = self.resolve_cell_index(cell_id)
+        return self._cells[index]
+
+    # ---------- cell reordering ----------
+
+    def move_cell(self, from_index: int, to_index: int) -> None:
+        """Move the cell at *from_index* to *to_index* in the buffer.
+
+        The cell is removed from its current position and re-inserted so that
+        it occupies *to_index* in the resulting list.
+
+        Raises:
+            IndexError: if either index is out of range ``[0..len-1]``.
+        """
+        self._ensure_loaded()
+        n = len(self._cells)
+        if from_index < 0 or from_index >= n:
+            raise IndexError(f"move_cell: from_index {from_index} out of range 0..{n - 1}")
+        if to_index < 0 or to_index >= n:
+            raise IndexError(f"move_cell: to_index {to_index} out of range 0..{n - 1}")
+        if from_index == to_index:
+            return
+        cell = self._cells.pop(from_index)
+        self._cells.insert(to_index, cell)
+        self._dirty = True
+
     @property
     def _cells(self) -> list[dict[str, Any]]:
         return self._doc.setdefault("cells", [])

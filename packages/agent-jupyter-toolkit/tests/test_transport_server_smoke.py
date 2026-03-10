@@ -35,3 +35,39 @@ async def test_server_execute_ok():
         )
     finally:
         await sess.shutdown()
+
+
+@skip_server
+async def test_server_restart_clears_namespace_and_keeps_session_usable():
+    cfg = SessionConfig(
+        mode="server",
+        server=ServerConfig(
+            base_url=os.environ["JAT_SERVER_URL"].rstrip("/"),
+            token=os.getenv("JAT_SERVER_TOKEN"),
+            kernel_name="python3",
+        ),
+    )
+    sess = create_session(cfg)
+    await sess.start()
+    try:
+        first = await sess.execute("x = 41")
+        assert first.status == "ok"
+
+        before_restart = await sess.execute("print(x)")
+        assert before_restart.status == "ok"
+        assert "41" in before_restart.stdout
+
+        await sess.restart()
+
+        after_restart = await sess.execute("print('server kernel alive after restart')")
+        assert after_restart.status == "ok"
+        assert "server kernel alive after restart" in after_restart.stdout
+
+        missing_name = await sess.execute("x")
+        assert missing_name.status == "error"
+        assert any(
+            output.get("output_type") == "error" and output.get("ename") == "NameError"
+            for output in missing_name.outputs
+        )
+    finally:
+        await sess.shutdown()

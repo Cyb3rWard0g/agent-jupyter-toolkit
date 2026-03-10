@@ -123,6 +123,12 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
         self._create_if_missing = bool(create_if_missing)
         self._timeout = float(request_timeout)
 
+        # Stale-write guard: tracks the server ``last_modified`` timestamp
+        # from the most recent fetch so that mutations can detect concurrent
+        # external edits before saving.
+        self._last_modified: str | None = None
+        self._has_freshness_baseline = False
+
     async def start(self) -> None:
         """
         Open a reusable HTTP session. Optionally ensure the notebook file exists.
@@ -168,12 +174,19 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
         """
         Return nbformat-like notebook dict (content only).
 
+        As a side-effect, the server's ``last_modified`` timestamp is stored
+        so that subsequent mutations can detect concurrent external edits
+        (see :pymethod:`_check_stale`).
+
         Raises:
             RuntimeError with server response details if fetch fails.
         """
         assert self._session is not None, "Call start() first"
         url = f"{self._base}/api/contents/{quote(self._path)}"
         model = await self._json_request("GET", url)
+        # Store last_modified for stale-write detection
+        self._last_modified = model.get("last_modified")
+        self._has_freshness_baseline = self._last_modified is not None
         content = model.get("content") or {}
         if not isinstance(content, dict):
             raise RuntimeError(f"Contents GET returned unexpected content for {self._path}")
@@ -203,15 +216,39 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
         return cell.get("source", "")
 
     async def save(self, content: dict[str, Any]) -> None:
-        """PUT the entire notebook content (content must be an nbformat-like dict)."""
+        """PUT the entire notebook content (content must be an nbformat-like dict).
+
+        Before every save, the server is queried first (metadata-only GET) to
+        verify the notebook has not been modified externally. For existing
+        notebooks, callers must establish a freshness baseline with ``fetch()``
+        before the first save so the transport can detect stale writes instead
+        of silently overwriting newer content.
+
+        Raises:
+            RuntimeError: if the notebook was modified externally since the
+                last fetch, if no freshness baseline has been established for
+                an existing notebook, or on any HTTP error.
+        """
         assert self._session is not None, "Call start() first"
+        await self._check_stale()
         url = f"{self._base}/api/contents/{quote(self._path)}"
         body = {"type": "notebook", "format": "json", "content": content}
-        await self._json_request("PUT", url, json=body)
+        model = await self._json_request("PUT", url, json=body)
+        # Update tracked timestamp from the server response after a
+        # successful save so the next mutation uses the fresh value.
+        if isinstance(model, dict) and "last_modified" in model:
+            self._last_modified = model["last_modified"]
+            self._has_freshness_baseline = self._last_modified is not None
         for cb in self._on_change:
             cb({"op": "save"})
 
-    async def _mutate_cells(self, mutator, *, kind: str) -> int:
+    async def _mutate_cells(
+        self,
+        mutator,
+        *,
+        kind: str,
+        event: dict[str, Any] | None = None,
+    ) -> int:
         """
         Serialize: fetch → mutate → save.
 
@@ -228,8 +265,11 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
             content["cells"] = cells
             await self.save(content)
             log.debug("Contents mutation '%s' at index %s", kind, index)
+            payload = {"op": "cells-mutated", "kind": kind, "index": index}
+            if event:
+                payload.update(event)
             for cb in self._on_change:
-                cb({"op": "cells-mutated", "kind": kind, "index": index})
+                cb(payload)
             return index
 
     async def append_code_cell(
@@ -375,9 +415,124 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
 
         await self._mutate_cells(m, kind="delete")
 
+    # ---------- cell addressing by ID ----------
+
+    async def resolve_cell_index(self, cell_id: str) -> int:
+        """Return the zero-based index of the cell matching *cell_id*.
+
+        Fetches the notebook and performs a linear scan over cells.  The
+        Contents API has no cell-level addressing so a full fetch is required.
+
+        Raises:
+            KeyError: if no cell with the given ID exists.
+        """
+        content = await self.fetch()
+        cells = content.get("cells") or []
+        for idx, cell in enumerate(cells):
+            if cell.get("id") == cell_id:
+                return idx
+        raise KeyError(f"No cell with id {cell_id!r}")
+
+    async def get_cell_by_id(self, cell_id: str) -> dict[str, Any]:
+        """Return the cell whose ``id`` matches *cell_id*.
+
+        Raises:
+            KeyError: if no cell with the given ID exists.
+        """
+        content = await self.fetch()
+        cells = content.get("cells") or []
+        for cell in cells:
+            if cell.get("id") == cell_id:
+                return cell
+        raise KeyError(f"No cell with id {cell_id!r}")
+
+    # ---------- cell reordering ----------
+
+    async def move_cell(self, from_index: int, to_index: int) -> None:
+        """Move the cell at *from_index* to *to_index*.
+
+        The operation is serialized behind the internal mutation lock so it
+        is safe from concurrent modification.  Emits a ``cells-mutated``
+        change event with ``kind="move"``.
+
+        Raises:
+            IndexError: if either index is out of range ``[0..len-1]``.
+        """
+
+        def m(cells):
+            n = len(cells)
+            if from_index < 0 or from_index >= n:
+                raise IndexError(f"move_cell: from_index {from_index} out of range 0..{n - 1}")
+            if to_index < 0 or to_index >= n:
+                raise IndexError(f"move_cell: to_index {to_index} out of range 0..{n - 1}")
+            if from_index != to_index:
+                cell = cells.pop(from_index)
+                cells.insert(to_index, cell)
+            return to_index
+
+        await self._mutate_cells(
+            m,
+            kind="move",
+            event={"from": from_index, "to": to_index},
+        )
+
     def on_change(self, cb: Callable[[dict[str, Any]], None]) -> None:
         """Register a callback invoked after save/mutation."""
         self._on_change.append(cb)
+
+    # ---------- stale-write guard ----------
+
+    @property
+    def last_modified(self) -> str | None:
+        """The ``last_modified`` timestamp from the most recent ``fetch()``.
+
+        Returns ``None`` if no fetch has been performed yet.  This value is
+        automatically updated after every successful ``fetch()`` and ``save()``.
+        """
+        return self._last_modified
+
+    async def _check_stale(self) -> None:
+        """Verify the notebook has not been modified externally.
+
+        Performs a lightweight metadata-only GET (``content=0``) against the
+        Contents API and compares the server's ``last_modified`` value to the
+        one recorded by the most recent ``fetch()``.
+
+        Raises:
+            RuntimeError: if the server's ``last_modified`` differs from the
+                tracked value, indicating an external concurrent edit.
+        """
+        model = await self._fetch_metadata(allow_missing=True)
+        if model is None:
+            return
+        server_ts = model.get("last_modified")
+        if not self._has_freshness_baseline:
+            raise RuntimeError(
+                f"Refusing to save notebook {self._path!r} without a freshness baseline. "
+                f"Call fetch() before save() so concurrent edits can be detected."
+            )
+        if server_ts and server_ts != self._last_modified:
+            raise RuntimeError(
+                f"Notebook {self._path!r} was modified externally "
+                f"(expected last_modified={self._last_modified!r}, "
+                f"server has {server_ts!r}). "
+                f"Re-fetch the notebook before saving."
+            )
+
+    async def _fetch_metadata(self, *, allow_missing: bool = False) -> dict[str, Any] | None:
+        """Fetch notebook metadata without content.
+
+        Returns ``None`` when ``allow_missing`` is true and the notebook does
+        not yet exist on the server.
+        """
+        assert self._session is not None, "Call start() first"
+        url = f"{self._base}/api/contents/{quote(self._path)}"
+        try:
+            return await self._json_request("GET", url, params={"content": "0", "type": "notebook"})
+        except RuntimeError as exc:
+            if allow_missing and "failed (404)" in str(exc):
+                return None
+            raise
 
     async def _json_request(self, method: str, url: str, **kwargs) -> dict[str, Any]:
         """
