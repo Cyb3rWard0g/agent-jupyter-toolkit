@@ -353,9 +353,7 @@ class SessionManager:
                     log.debug("Server notebook already absent: %s", path)
                     return True
                 text = await resp.text()
-                raise RuntimeError(
-                    f"Failed to delete notebook {path} " f"(HTTP {resp.status}): {text}"
-                )
+                raise RuntimeError(f"Failed to delete notebook {path} (HTTP {resp.status}): {text}")
 
     def _build_session(self, notebook_path: str) -> NotebookSession:
         """Build an uninitialised session for the given notebook path."""
