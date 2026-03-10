@@ -16,7 +16,6 @@ dev = [
   "anyio>=4.12.1",
   "ipykernel",
   "ruff>=0.14.13",
-  "black",
   "build",
   "twine",
 ]
@@ -50,18 +49,3 @@ preview = true
 
 [tool.ruff.lint.isort]
 known-first-party = ["agent_jupyter_toolkit", "mcp_jupyter_notebook"]
-
-[tool.black]
-target-version = ["py311", "py312", "py313"]
-line-length = 100
-exclude = '''
-/(
-  \.venv
- | \.tox
- | build
- | dist
- | __pycache__
- | \.eggs
- | repos
-)/
-'''

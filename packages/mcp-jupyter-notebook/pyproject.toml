@@ -32,6 +32,10 @@ dependencies = [
 mcp-jupyter-notebook = "mcp_jupyter_notebook:main"
 
 [project.optional-dependencies]
+dataframe = [
+  "agent-jupyter-toolkit[dataframe]",
+]
+
 postgres = [
   "agent-data-toolkit[postgresql]",
 ]
