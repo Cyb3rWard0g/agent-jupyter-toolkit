@@ -4,6 +4,7 @@ Manages kernel start, stop, restart, health checks, and exposes channels.
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 
@@ -107,8 +108,14 @@ class KernelManager:
         async with self._lock:
             if not self._km:
                 raise KernelError("No kernel to restart.")
+            old_client = self._kc
+            if old_client:
+                with contextlib.suppress(Exception):
+                    old_client.stop_channels()
             await self._km.restart_kernel(now=True)
             self._kc = self._km.client()
+            if self._kc and self._packer:
+                self._kc.session.packer = self._packer
             self._kc.start_channels()
             await self._kc.wait_for_ready(timeout=self.startup_timeout)
             logger.info("Kernel restarted and ready.")
@@ -134,12 +141,7 @@ class KernelManager:
         if self._km is None:
             return False
         try:
-            # Note: _km.is_alive() is async in newer jupyter_client versions
-            if hasattr(self._km, "_async_is_alive"):
-                return await self._km._async_is_alive()
-            else:
-                # Fallback for older versions or sync is_alive
-                return bool(self._km.is_alive())
+            return await self._km.is_alive()
         except Exception:
             return False
 
@@ -147,12 +149,8 @@ class KernelManager:
         if self._kc is None or self._km is None:
             return False
         try:
-            msg_id = self._kc.kernel_info()
-            for _ in range(10):
-                msg = await self._kc.get_shell_msg(timeout=0.5)
-                if msg and msg.get("parent_header", {}).get("msg_id") == msg_id:
-                    return True
-            return False
+            reply = await self._kc.kernel_info(reply=True, timeout=5)
+            return reply.get("content", {}).get("status") == "ok"
         except Exception as e:
             logger.warning(f"Kernel health check failed: {e}")
             return False

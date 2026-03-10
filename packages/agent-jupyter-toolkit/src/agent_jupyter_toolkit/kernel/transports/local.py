@@ -384,6 +384,18 @@ class LocalTransport(KernelTransport):
 
     # ── Introspection / control ──────────────────────────────────────────
 
+    async def restart(self) -> None:
+        """Restart the local kernel process via the KernelManager.
+
+        The kernel is restarted in-place — its OS process is replaced but the
+        ZMQ channels and connection file are preserved.  After this call the
+        kernel has a clean namespace and is ready for new executions.
+
+        Raises:
+            RuntimeError: If no kernel is currently managed.
+        """
+        await self._km.restart()
+
     async def interrupt(self) -> None:
         """Interrupt the running kernel via the KernelManager."""
         await self._km.interrupt()
@@ -393,11 +405,7 @@ class LocalTransport(KernelTransport):
         if not self._km or not self._km.client:
             raise RuntimeError("LocalTransport not started. Call start() first.")
         kc = self._km.client
-        msg_id = kc.complete(code, cursor_pos)
-        reply = await kc.get_shell_msg(timeout=10)
-        # Drain until we find the matching reply
-        while reply.get("parent_header", {}).get("msg_id") != msg_id:
-            reply = await kc.get_shell_msg(timeout=10)
+        reply = await kc.complete(code, cursor_pos, reply=True, timeout=10)
         content = reply.get("content", {})
         return CompleteResult(
             matches=content.get("matches", []),
@@ -417,10 +425,9 @@ class LocalTransport(KernelTransport):
         if not self._km or not self._km.client:
             raise RuntimeError("LocalTransport not started. Call start() first.")
         kc = self._km.client
-        msg_id = kc.inspect(code, cursor_pos, detail_level=detail_level)
-        reply = await kc.get_shell_msg(timeout=10)
-        while reply.get("parent_header", {}).get("msg_id") != msg_id:
-            reply = await kc.get_shell_msg(timeout=10)
+        reply = await kc.inspect(
+            code, cursor_pos, detail_level=detail_level, reply=True, timeout=10
+        )
         content = reply.get("content", {})
         return InspectResult(
             found=content.get("found", False),
@@ -434,10 +441,7 @@ class LocalTransport(KernelTransport):
         if not self._km or not self._km.client:
             raise RuntimeError("LocalTransport not started. Call start() first.")
         kc = self._km.client
-        msg_id = kc.is_complete(code)
-        reply = await kc.get_shell_msg(timeout=10)
-        while reply.get("parent_header", {}).get("msg_id") != msg_id:
-            reply = await kc.get_shell_msg(timeout=10)
+        reply = await kc.is_complete(code, reply=True, timeout=10)
         content = reply.get("content", {})
         return IsCompleteResult(
             status=content.get("status", "unknown"),
@@ -456,15 +460,14 @@ class LocalTransport(KernelTransport):
         if not self._km or not self._km.client:
             raise RuntimeError("LocalTransport not started. Call start() first.")
         kc = self._km.client
-        msg_id = kc.history(
+        reply = await kc.history(
             raw=raw,
             output=output,
             hist_access_type=hist_access_type,
             n=n,
+            reply=True,
+            timeout=10,
         )
-        reply = await kc.get_shell_msg(timeout=10)
-        while reply.get("parent_header", {}).get("msg_id") != msg_id:
-            reply = await kc.get_shell_msg(timeout=10)
         content = reply.get("content", {})
         entries = [
             HistoryEntry(
@@ -482,10 +485,7 @@ class LocalTransport(KernelTransport):
         if not self._km or not self._km.client:
             raise RuntimeError("LocalTransport not started. Call start() first.")
         kc = self._km.client
-        msg_id = kc.kernel_info()
-        reply = await kc.get_shell_msg(timeout=10)
-        while reply.get("parent_header", {}).get("msg_id") != msg_id:
-            reply = await kc.get_shell_msg(timeout=10)
+        reply = await kc.kernel_info(reply=True, timeout=10)
         content = reply.get("content", {})
         lang = content.get("language_info", {})
         return KernelInfoResult(
