@@ -149,3 +149,24 @@ export JUPYTER_NOTEBOOK_PATH="quickstarts/output/awareness_demo.ipynb"
 export JUPYTER_TOKEN="YOUR_TOKEN"
 uv run python quickstarts/07_collab_awareness.py
 ```
+
+## Scenario 8: Restart-And-Run-All Reproducibility Check
+
+Script: `quickstarts/08_restart_and_run_all.py`
+
+What it does
+- Creates a local notebook file if missing
+- Adds a few cells to the notebook
+- Restarts the kernel and executes all code cells from a clean state
+- Prints the aggregate `RunAllResult`
+
+Why it matters
+- This is the strongest built-in check that a notebook is reproducible from scratch
+
+Environment variables
+- `LOCAL_NOTEBOOK_PATH` (optional, default `quickstarts/output/restart_and_run_all_demo.ipynb`)
+
+Run it
+```bash
+uv run python quickstarts/08_restart_and_run_all.py
+```

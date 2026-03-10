@@ -5,14 +5,14 @@
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives AI agents full control over a live Jupyter notebook session — run code, add markdown, manage packages, inspect variables, and more. Built on [agent-jupyter-toolkit](https://github.com/Cyb3rWard0g/agent-jupyter-toolkit) and the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk).
 
 <p align="center">
-  <img src="https://img.shields.io/badge/MCP-Tools_28-green" alt="28 tools" />
+  <img src="https://img.shields.io/badge/MCP-Tools-green" alt="MCP tools" />
   <img src="https://img.shields.io/badge/transport-stdio%20|%20SSE%20|%20HTTP-orange" alt="transports" />
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+" />
 </p>
 
 ## Features
 
-- **28 MCP tools** — notebook lifecycle, code execution, markdown, cell reads, packages, kernel control, introspection, variables
+- **Rich MCP tool surface** — notebook lifecycle, code execution, markdown, stable cell-ID operations, packages, kernel control, introspection, variables
 - **Optional PostgreSQL tools** — enable on demand to create a DB client/connection in the kernel
 - **Real-time sync** — Yjs collaboration transport shows cell edits instantly in JupyterLab
 - **Two session modes** — connect to a remote Jupyter server or run a local kernel
@@ -99,6 +99,8 @@ Ask your agent:
 | `notebook_code_run_existing` | Replace the source of an existing cell (by index) and re-execute it |
 | `notebook_code_execute` | Execute code in the kernel *without* creating a notebook cell (background work) |
 | `notebook_cells_run` | Execute multiple cells sequentially (code and/or markdown) |
+| `notebook_run_all` | Execute every code cell in notebook order and return a per-cell summary |
+| `notebook_restart_and_run_all` | Restart the kernel, then execute every code cell from a clean state |
 
 ### Notebook Document
 
@@ -107,13 +109,20 @@ Ask your agent:
 | `notebook_markdown_add` | Add a markdown cell (append or insert at position) |
 | `notebook_read` | Read all cells, sources, outputs, and metadata |
 | `notebook_cell_delete` | Delete a cell by its 0-based index |
+| `notebook_cell_delete_by_id` | Delete a cell by its stable Jupyter cell ID |
+| `notebook_cell_source_set_by_id` | Replace a cell's source text using its stable cell ID |
+| `notebook_cell_move` | Move a cell to a new index using its stable cell ID |
+| `notebook_cell_move_before` | Move a cell immediately before another stable cell ID |
+| `notebook_cell_move_after` | Move a cell immediately after another stable cell ID |
 
 ### Cell Reads
 
 | Tool | Description |
 |---|---|
 | `notebook_cell_read` | Read a single cell by index (full dict with type, source, outputs, metadata) |
+| `notebook_cell_read_by_id` | Read a single cell by stable Jupyter cell ID |
 | `notebook_cell_source` | Return only the source text of a cell |
+| `notebook_cell_source_by_id` | Return only the source text using a stable cell ID |
 | `notebook_cell_count` | Return the number of cells in the notebook |
 
 ### Packages
@@ -154,6 +163,9 @@ Ask your agent:
 # From PyPI (when published)
 uvx mcp-jupyter-notebook
 
+# From PyPI with toolkit DataFrame serialization support
+uv pip install "mcp-jupyter-notebook[dataframe]"
+
 # From source
 git clone https://github.com/Cyb3rWard0g/mcp-jupyter-notebook.git
 cd mcp-jupyter-notebook
@@ -192,7 +204,7 @@ src/mcp_jupyter_notebook/
 ├── server.py       # FastMCP server, lifespan, config processing
 ├── context.py      # AppContext dataclass (shared lifespan state)
 └── tools/          # Tool registrations (notebook + optional domains)
-  ├── notebook.py     # All notebook tool definitions
+  ├── notebook/       # Core notebook tool pack, split by concern
   └── postgresql.py   # Optional PostgreSQL helper tools
 ```
 

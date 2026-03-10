@@ -25,7 +25,13 @@ await transport.append_markdown_cell(source, tags=None)
 await transport.insert_markdown_cell(index, source, tags=None)
 await transport.update_cell_outputs(index, outputs, execution_count)
 await transport.set_cell_source(index, source)
+await transport.get_cell(index)
+await transport.cell_count()
+await transport.get_cell_source(index)
 await transport.delete_cell(index)
+await transport.resolve_cell_index(cell_id)
+await transport.get_cell_by_id(cell_id)
+await transport.move_cell(from_index, to_index)
 transport.on_change(callback)
 ```
 
@@ -219,6 +225,8 @@ async with NotebookSession(kernel=kernel, doc=doc) as nb:
 | `append_and_run(code, timeout=None)` | `(int, ExecutionResult)` | Append cell, execute, stream outputs |
 | `run_at(index, code, timeout=None)` | `ExecutionResult` | Replace cell source and execute. Raises `TypeError` if the target is not a code cell. |
 | `run_markdown(text, index=None)` | `int` | Insert/append a markdown cell |
+| `run_all(stop_on_error=True, timeout=None)` | `RunAllResult` | Execute every code cell in notebook order |
+| `restart_and_run_all(stop_on_error=True, timeout=None)` | `RunAllResult` | Restart kernel, then run all code cells from a clean state |
 | `is_connected()` | `bool` | Both kernel and document are live |
 
 ### Streaming behavior

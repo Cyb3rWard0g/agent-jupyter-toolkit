@@ -81,6 +81,14 @@ Try these small prompts to validate the tool surface end-to-end:
 4. *"Install `pandas` and show its version."*
 5. *"Delete the last cell, then read the notebook to confirm it changed."*
 
+### Exercise: Stable Cell-ID Editing
+
+These prompts validate the durable cell-ID workflow that avoids index drift:
+
+1. *"Read the notebook and tell me the `cell_id` of the first markdown cell."*
+2. *"Using that `cell_id`, replace its source with a new title and subtitle."*
+3. *"Create a new markdown summary cell, then move it before the first code cell using stable cell IDs."*
+
 ---
 
 ## Server Mode — for JupyterLab (Browser)
@@ -176,6 +184,14 @@ These focus on confirming the “edits show up in JupyterLab” workflow:
 2. *"Run a code cell that prints the Python version and the current working directory."*
 3. *"Read the notebook and summarize the first 5 cells (type + first line)."*
 4. *"Restart the kernel, then re-run a simple cell to confirm the kernel is alive."*
+
+### Exercise: Stable Cell-ID Editing
+
+These prompts are useful for validating multi-step edits while watching JupyterLab update in real time:
+
+1. *"Read the notebook and identify the `cell_id` for the section header cell."*
+2. *"Update that cell by `cell_id` so the header says 'Exploration Plan' and includes two bullet points."*
+3. *"Add a markdown conclusions cell, then move it after the last code cell using stable cell IDs instead of indices."*
 
 ### Exercise (Optional): PostgreSQL tools
 

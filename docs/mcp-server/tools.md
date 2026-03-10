@@ -1,6 +1,6 @@
 # Tools Reference
 
-The MCP Jupyter Notebook server exposes **28 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** for database exploration and query→DataFrame workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
+The MCP Jupyter Notebook server exposes **37 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** for database exploration and query→DataFrame workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
 
 > **Multi-notebook support:** Every tool accepts an optional `notebook_path` parameter. When omitted, the tool targets the default notebook (backward compatible with single-notebook setups).
 
@@ -106,7 +106,7 @@ Append a new code cell to the notebook, execute it, and return outputs.
 | `code` | `string` | Yes | — | Python code to execute |
 | `timeout` | `float` | No | `120.0` | Execution timeout in seconds |
 
-**Returns:** `ok`, `cell_index`, `execution_count`, `status`, `stdout`, `stderr`, `outputs`, `text_outputs`, `formatted_output`, `error_message`, `elapsed_seconds`
+**Returns:** `ok`, `cell_id`, `cell_index`, `execution_count`, `status`, `stdout`, `stderr`, `outputs`, `text_outputs`, `formatted_output`, `error_message`, `elapsed_seconds`
 
 **Example prompt:** *"Run `print('Hello, world!')` in the notebook"*
 
@@ -154,9 +154,39 @@ Execute multiple cells sequentially. Each cell can be code or markdown.
 | `cells` | `list[dict]` | Yes | — | List of `{"type": "code"|"markdown", "content": "..."}` |
 | `timeout` | `float` | No | `120.0` | Per-cell execution timeout |
 
-**Returns:** List of result dicts, one per cell
+**Returns:** List of result dicts, one per cell, including `cell_id` for notebook-backed cells
 
 **Example prompt:** *"Add a markdown header, import pandas, and create a DataFrame — all in one go"*
+
+---
+
+### `notebook_run_all`
+
+Execute every code cell in notebook order. Markdown cells and empty code cells are skipped, and the result includes aggregate status plus a per-cell breakdown.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `timeout` | `float` | No | `120.0` | Per-cell execution timeout |
+| `stop_on_error` | `bool` | No | `true` | Stop at the first failed cell |
+
+**Returns:** `ok`, `status`, `executed_count`, `skipped_count`, `cells`, `first_failure`, `elapsed_seconds`
+
+**Example prompt:** *"Run all code cells and tell me where the notebook fails"*
+
+---
+
+### `notebook_restart_and_run_all`
+
+Restart the kernel, then execute every code cell from a clean state. Use this to verify notebook reproducibility instead of relying on existing kernel state.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `timeout` | `float` | No | `120.0` | Per-cell execution timeout |
+| `stop_on_error` | `bool` | No | `true` | Stop at the first failed cell |
+
+**Returns:** `ok`, `status`, `executed_count`, `skipped_count`, `cells`, `first_failure`, `elapsed_seconds`
+
+**Example prompt:** *"Restart the kernel and run the whole notebook to confirm it is reproducible"*
 
 ---
 
@@ -171,7 +201,7 @@ Add a markdown cell to the notebook. The cell is rendered in JupyterLab's UI. By
 | `content` | `string` | Yes | — | Markdown content |
 | `position` | `int` | No | `null` | 0-based index to insert the cell at. If omitted, the cell is appended to the end. |
 
-**Returns:** `ok`, `cell_index`, `error_message`, `elapsed_seconds`
+**Returns:** `ok`, `cell_id`, `cell_index`, `error_message`, `elapsed_seconds`
 
 **Example prompt:** *"Add a title and description for this analysis"*
 
@@ -185,7 +215,7 @@ Read the full notebook content — all cells, their sources, outputs, and metada
 |---|---|---|---|---|
 | *(none)* | — | — | — | — |
 
-**Returns:** `ok`, `cell_count`, `cells` (list of `{index, cell_type, source, execution_count, outputs_count}`), `metadata`
+**Returns:** `ok`, `cell_count`, `cells` (list of `{index, cell_id, cell_type, source, execution_count, outputs_count}`), `metadata`
 
 **Example prompt:** *"Read the notebook and summarize what's been done so far"*
 
@@ -205,6 +235,80 @@ Delete a cell from the notebook by its 0-based index.
 
 ---
 
+### `notebook_cell_delete_by_id`
+
+Delete a cell using its stable Jupyter cell ID instead of a positional index. Prefer this when the notebook may be edited concurrently or cell positions may shift.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cell_id` | `string` | Yes | — | Stable Jupyter cell ID to remove |
+
+**Returns:** `ok`, `cell_id`, `deleted_index`
+
+**Example prompt:** *"Delete the cell whose id is `a1b2c3`"*
+
+---
+
+### `notebook_cell_move`
+
+Move a cell to a new 0-based index using its stable cell ID as the source handle. This avoids targeting the wrong cell when positions have shifted.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cell_id` | `string` | Yes | — | Stable Jupyter cell ID to move |
+| `to_index` | `int` | Yes | — | Destination 0-based index |
+
+**Returns:** `ok`, `cell_id`, `from_index`, `to_index`
+
+**Example prompt:** *"Move the results cell above the plotting code"*
+
+---
+
+### `notebook_cell_move_before`
+
+Move a cell so it ends up immediately before another stable cell ID. This is safer than index-based reordering when agents are editing a notebook over multiple steps.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cell_id` | `string` | Yes | — | Stable Jupyter cell ID to move |
+| `before_cell_id` | `string` | Yes | — | Stable Jupyter cell ID that should follow the moved cell |
+
+**Returns:** `ok`, `cell_id`, `before_cell_id`, `from_index`, `to_index`
+
+**Example prompt:** *"Move the summary cell before the visualization cell"*
+
+---
+
+### `notebook_cell_move_after`
+
+Move a cell so it ends up immediately after another stable cell ID.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cell_id` | `string` | Yes | — | Stable Jupyter cell ID to move |
+| `after_cell_id` | `string` | Yes | — | Stable Jupyter cell ID that should precede the moved cell |
+
+**Returns:** `ok`, `cell_id`, `after_cell_id`, `from_index`, `to_index`
+
+**Example prompt:** *"Move the imports cell after the title cell"*
+
+---
+
+### `notebook_cell_source_set_by_id`
+
+Replace a cell's source text using its stable ID without executing it. This is useful for editing markdown or staging code changes before deciding whether to run the cell.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cell_id` | `string` | Yes | — | Stable Jupyter cell ID |
+| `source` | `string` | Yes | — | New source text for the cell |
+
+**Returns:** `ok`, `cell_id`, `cell_index`, `source`
+
+**Example prompt:** *"Replace the markdown in the cell with id `a1b2c3` with a shorter summary"*
+
+---
+
 ## Cell Reads
 
 ### `notebook_cell_read`
@@ -215,9 +319,23 @@ Read a single cell by its 0-based index. Returns the full cell dict including ty
 |---|---|---|---|---|
 | `cell_index` | `int` | Yes | — | 0-based cell index |
 
-**Returns:** `ok`, `cell` (complete cell dict with `cell_type`, `source`, `outputs`, `metadata`)
+**Returns:** `ok`, `cell_index`, `cell_id`, `cell` (complete cell dict with `cell_type`, `source`, `outputs`, `metadata`)
 
 **Example prompt:** *"Read cell 5"*
+
+---
+
+### `notebook_cell_read_by_id`
+
+Read a single cell using its stable Jupyter cell ID. This is the most durable way for an agent to revisit a previously-created cell after insertions, deletions, or reordering.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cell_id` | `string` | Yes | — | Stable Jupyter cell ID |
+
+**Returns:** `ok`, `cell_id`, `cell`
+
+**Example prompt:** *"Read the cell with id `a1b2c3`"*
 
 ---
 
@@ -234,6 +352,21 @@ Return only the source text of a cell. This is a lightweight alternative to `not
 **Example prompt:** *"Show me the source of cell 2"*
 
 ---
+
+### `notebook_cell_source_by_id`
+
+Return only the source text of a cell using its stable ID. Useful when you already have a `cell_id` and want to avoid index drift.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cell_id` | `string` | Yes | — | Stable Jupyter cell ID |
+
+**Returns:** `ok`, `cell_id`, `source`
+
+**Example prompt:** *"Show me the source for the cell with id `a1b2c3`"*
+
+---
+
 
 ### `notebook_cell_count`
 

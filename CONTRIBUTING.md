@@ -42,10 +42,10 @@ uv run ruff check packages/ --fix
 
 ```sh
 # Check formatting (dry run)
-uv run black --check packages/
+uv run ruff format --check packages/
 
 # Auto-format
-uv run black packages/
+uv run ruff format packages/
 ```
 
 ### Tests
@@ -65,7 +65,7 @@ Run everything in one go before pushing:
 
 ```sh
 uv run ruff check packages/ --fix && \
-uv run black packages/ && \
+uv run ruff format packages/ && \
 cd packages/agent-jupyter-toolkit && uv run pytest --tb=short -q && cd ../.. && \
 cd packages/mcp-jupyter-notebook  && uv run pytest --tb=short -q && cd ../..
 ```
@@ -98,7 +98,7 @@ Two GitHub Actions workflows live in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | Push / PR to `main` | Lint (ruff, black) + tests (Python 3.11–3.13) |
+| `ci.yml` | Push / PR to `main` | Lint/format (ruff) + tests (Python 3.11–3.13) |
 | `release.yml` | Push a `v*` tag | Build → test → publish to PyPI → GitHub Release → Docker image |
 
 **Pushing to `main` never triggers a release.** Only pushing a version tag does.
@@ -120,7 +120,7 @@ There is no hard-coded version anywhere — one tag drives both packages.
 
 ```sh
 uv run ruff check packages/ --fix
-uv run black packages/
+uv run ruff format packages/
 cd packages/agent-jupyter-toolkit && uv run pytest --tb=short -q && cd ../..
 cd packages/mcp-jupyter-notebook  && uv run pytest --tb=short -q && cd ../..
 ```

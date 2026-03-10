@@ -305,7 +305,13 @@ Runtime-checkable protocol for notebook document operations.
 | `insert_markdown_cell(index, source, ...)` | `async def ... -> None` | Insert markdown cell |
 | `update_cell_outputs(index, outputs, count)` | `async def ... -> None` | Replace cell outputs |
 | `set_cell_source(index, source)` | `async def ... -> None` | Replace cell source |
+| `get_cell(index)` | `async def ... -> dict` | Read a single cell |
+| `cell_count()` | `async def ... -> int` | Count cells |
+| `get_cell_source(index)` | `async def ... -> str` | Read source text only |
 | `delete_cell(index)` | `async def ... -> None` | Delete cell |
+| `resolve_cell_index(cell_id)` | `async def ... -> int` | Resolve stable cell ID to index |
+| `get_cell_by_id(cell_id)` | `async def ... -> dict` | Read a cell by stable ID |
+| `move_cell(from_index, to_index)` | `async def ... -> None` | Reorder a cell |
 | `on_change(callback)` | `def ... -> None` | Register change observer |
 
 Implementations: `LocalFileDocumentTransport`, `ContentsApiDocumentTransport`,
@@ -326,9 +332,14 @@ class NotebookSession:
 |--------|-----------|---------|
 | `start()` | `async def start() -> None` | Start kernel then doc |
 | `stop()` | `async def stop() -> None` | Stop doc then kernel |
+| `get_cell(index)` | `async def ... -> dict` | Read a single cell |
+| `cell_count()` | `async def ... -> int` | Count cells |
+| `get_cell_source(index)` | `async def ... -> str` | Read source text only |
 | `append_and_run(code, *, metadata=None, timeout=None)` | `async def ... -> tuple[int, ExecutionResult]` | Append + execute cell |
 | `run_at(index, code, *, timeout=None)` | `async def ... -> ExecutionResult` | Update + execute cell. Raises `TypeError` if the cell is not a code cell. |
 | `run_markdown(text, *, index=None)` | `async def ... -> int` | Insert markdown cell |
+| `run_all(*, stop_on_error=True, timeout=None)` | `async def ... -> RunAllResult` | Execute all code cells in notebook order |
+| `restart_and_run_all(*, stop_on_error=True, timeout=None)` | `async def ... -> RunAllResult` | Restart kernel, then execute all code cells |
 | `is_connected()` | `async def ... -> bool` | Both live |
 
 Supports `async with`.
@@ -347,6 +358,9 @@ In-memory `MutableSequence` wrapper over a transport.
 | `append_markdown_cell(source, ...)` | `def ... -> int` | Sync append |
 | `set_cell_source(index, source)` | `def ... -> None` | Sync update |
 | `update_cell_outputs(index, outputs, count)` | `def ... -> None` | Sync update |
+| `resolve_cell_index(cell_id)` | `def ... -> int` | Resolve stable cell ID to index |
+| `get_cell_by_id(cell_id)` | `def ... -> dict` | Read a cell by stable ID |
+| `move_cell(from_index, to_index)` | `def ... -> None` | Reorder a cell in memory |
 
 | Property | Type | Description |
 |----------|------|-------------|

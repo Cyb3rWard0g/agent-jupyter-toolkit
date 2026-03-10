@@ -49,7 +49,7 @@ async def main() -> None:
 
     async with notebook_session:
         idx, result = await notebook_session.append_and_run(
-            "import math\n" "print('pi:', math.pi)\n" "print('tau:', math.tau)\n"
+            "import math\nprint('pi:', math.pi)\nprint('tau:', math.tau)\n"
         )
 
     print("cell_index:", idx)

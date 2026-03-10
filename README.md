@@ -1,14 +1,21 @@
 # Agent Jupyter Toolkit
 
-A project to provide the right tools for AI agents to interact with Jupyter
-notebooks. This includes async kernel execution, notebook document management,
-and an MCP server exposing these capabilities to any agent framework that supports
-MCP clients. The project is organized as a monorepo containing multiple packages.
+![](docs/Agent-Jupyter-Toolkit-Architecture.png)
+
+An open-source project to provide the right tools for AI agents to execute
+code through Jupyter kernels, whether local or remote, and optionally attach
+a notebook document for persistent, reproducible workflows. At its core, the
+project offers a Python library with async kernel sessions, notebook document
+transports, variable management, and dependency tracking so any agent
+framework can integrate directly. To align with the community's adoption of
+Model Context Protocol (MCP), the project also ships an MCP server that exposes
+these same capabilities as a standardized tool suite, including optional
+PostgreSQL tools for data workflows.
 
 | Package | Description | Install |
 |---------|-------------|---------|
-| [**agent-jupyter-toolkit**](packages/agent-jupyter-toolkit/) | Domain library — async kernel sessions, notebook transports, variable management, MIME serialization | `pip install agent-jupyter-toolkit` |
-| [**mcp-jupyter-notebook**](packages/mcp-jupyter-notebook/) | MCP server — 28 core notebook tools + 8 optional PostgreSQL tools for AI agents | `pip install mcp-jupyter-notebook` |
+| [**agent-jupyter-toolkit**](packages/agent-jupyter-toolkit/) | Domain library — async kernel sessions, notebook transports, variable management, MIME serialization | `pip install agent-jupyter-toolkit` or `pip install agent-jupyter-toolkit[dataframe]` for DataFrame serialization |
+| [**mcp-jupyter-notebook**](packages/mcp-jupyter-notebook/) | MCP server — core notebook tools + optional PostgreSQL tools for AI agents | `pip install mcp-jupyter-notebook` or `pip install mcp-jupyter-notebook[dataframe]` |
 
 ## Quick Start
 
@@ -16,8 +23,14 @@ MCP clients. The project is organized as a monorepo containing multiple packages
 # Install just the toolkit
 pip install agent-jupyter-toolkit
 
+# Install toolkit + DataFrame serialization support
+pip install agent-jupyter-toolkit[dataframe]
+
 # Or install the MCP server (includes the toolkit as a dependency)
 pip install mcp-jupyter-notebook
+
+# MCP server + toolkit DataFrame serialization support
+pip install mcp-jupyter-notebook[dataframe]
 ```
 
 ### Toolkit — run code in a Jupyter kernel
@@ -85,7 +98,7 @@ uv run --all-packages pytest
 
 # Lint & format
 uv run ruff check packages/ --fix
-uv run black packages/
+uv run ruff format packages/
 ```
 
 ## Repository Layout
@@ -114,7 +127,7 @@ uv run black packages/
 | [Getting Started](docs/getting-started.md) | Installation, first kernel session, first notebook edit |
 | [Architecture](docs/architecture.md) | Monorepo layout, transport pattern, design decisions |
 | [Toolkit Docs](docs/toolkit/) | Kernel sessions, notebook transports, utilities, configuration, API reference |
-| [MCP Server Docs](docs/mcp-server/) | Server architecture, configuration, 28 notebook + 8 PostgreSQL tools |
+| [MCP Server Docs](docs/mcp-server/) | Server architecture, configuration, notebook + PostgreSQL tools |
 | [Contributing](CONTRIBUTING.md) | Dev setup, testing, linting, release process |
 
 ## License

@@ -10,8 +10,14 @@ This guide covers installation for both packages in this monorepo.
 # Install the toolkit (domain library)
 pip install agent-jupyter-toolkit
 
+# Install optional DataFrame serialization support
+pip install agent-jupyter-toolkit[dataframe]
+
 # Install the MCP server (also pulls in the toolkit as a dependency)
 pip install mcp-jupyter-notebook
+
+# Install the MCP server with the toolkit's optional DataFrame support
+pip install mcp-jupyter-notebook[dataframe]
 ```
 
 ### Development (editable)

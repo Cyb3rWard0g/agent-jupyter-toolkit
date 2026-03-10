@@ -41,9 +41,16 @@ A Python toolkit for building agent tools that interact with Jupyter kernels and
 # Using pip
 pip install agent-jupyter-toolkit
 
+# Install optional DataFrame serialization support
+pip install agent-jupyter-toolkit[dataframe]
+
 # Or using uv
 uv pip install agent-jupyter-toolkit
 ```
+
+Install the `dataframe` extra only if you want pandas/Arrow-backed DataFrame
+serialization and inspection helpers. Core kernel and notebook features do not
+require it.
 
 ### Development (monorepo)
 
@@ -188,7 +195,7 @@ agent_jupyter_toolkit
 | [pycrdt](https://pypi.org/project/pycrdt/) | CRDT types (Doc, Array, Map, Text, Awareness) |
 | [nbformat](https://pypi.org/project/nbformat/) | Notebook file format handling |
 | [aiohttp](https://pypi.org/project/aiohttp/) | Async HTTP/WS for server transport |
-| [pandas](https://pypi.org/project/pandas/) + [pyarrow](https://pypi.org/project/pyarrow/) | DataFrame variable inspection |
+| [pandas](https://pypi.org/project/pandas/) + [pyarrow](https://pypi.org/project/pyarrow/) | Optional `dataframe` extra for DataFrame variable inspection |
 
 ## Contributing
 
