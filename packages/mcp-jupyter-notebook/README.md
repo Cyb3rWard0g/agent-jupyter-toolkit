@@ -99,7 +99,7 @@ Ask your agent:
 |---|---|
 | `notebook_code_run` | Append a new code cell, execute it, and return outputs (stdout, stderr, rich displays) |
 | `notebook_code_run_existing` | Replace the source of an existing cell (by index) and re-execute it |
-| `notebook_code_execute` | Execute code in the kernel *without* creating a notebook cell (background work) |
+| `notebook_code_execute` | Execute code without creating a cell, optionally in a kernel subshell |
 | `notebook_cells_run` | Execute multiple cells sequentially (code and/or markdown) |
 | `notebook_run_all` | Execute every code cell in notebook order and return a per-cell summary |
 | `notebook_restart_and_run_all` | Restart the kernel, then execute every code cell from a clean state |
@@ -131,8 +131,10 @@ Ask your agent:
 
 | Tool | Description |
 |---|---|
-| `notebook_packages_install` | Install Python packages in the kernel (pip-style specifiers) |
+| `notebook_packages_install` | Install PEP 508 requirements in the kernel |
+| `notebook_packages_uninstall` | Uninstall parsed distribution requirements from the kernel |
 | `notebook_packages_check` | Check which packages are available without installing |
+| `notebook_dependencies_list` | List canonical tracked requirements and resolved versions |
 
 ### Kernel Control
 
@@ -143,6 +145,10 @@ Ask your agent:
 | `notebook_session_info` | Get session info (kernel type, alive status, connections) |
 | `notebook_kernel_history` | Retrieve recent execution history from the kernel |
 | `notebook_kernel_restart` | Restart the kernel (destructive — clears all state) |
+| `notebook_subshell_create` | Create a subshell when the kernel advertises support |
+| `notebook_subshell_list` | List active subshell IDs |
+| `notebook_subshell_delete` | Delete a subshell by ID |
+| `notebook_debug_request` | Send a Debug Adapter Protocol request to a capable kernel |
 
 ### Introspection
 

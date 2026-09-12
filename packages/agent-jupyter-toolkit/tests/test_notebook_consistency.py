@@ -9,6 +9,7 @@ import pycrdt
 import pytest
 from jupyter_ydoc import YNotebook
 from nbformat.validator import NotebookValidationError
+from nbformat.warnings import DuplicateCellId
 
 from agent_jupyter_toolkit.kernel.messages import fold_iopub_events
 from agent_jupyter_toolkit.kernel.types import ExecutionResult, KernelDisconnectedError
@@ -18,6 +19,7 @@ from agent_jupyter_toolkit.notebook.transports.collab.transport import (
 )
 from agent_jupyter_toolkit.notebook.transports.collab.yutils import make_code_cell_dict
 from agent_jupyter_toolkit.notebook.transports.local_file import LocalFileDocumentTransport
+from agent_jupyter_toolkit.notebook.utils import normalize_notebook, validate_notebook
 from agent_jupyter_toolkit.utils.execution import invoke_code_cell, invoke_existing_cell
 
 pytestmark = pytest.mark.asyncio
@@ -148,7 +150,6 @@ async def test_collaborative_move_preserves_shared_cell_types(monkeypatch):
     transport._cells = notebook.ycells
     transport._initial_sync_done.set()
     monkeypatch.setattr(transport, "_broadcast_update", AsyncMock())
-    monkeypatch.setattr(transport, "_wait_for_sync_completion", AsyncMock())
 
     with doc.transaction():
         for source in ("a = 1", "b = 2", "c = 3"):
@@ -160,6 +161,148 @@ async def test_collaborative_move_preserves_shared_cell_types(monkeypatch):
     assert [cell["source"] for cell in moved["cells"]] == ["b = 2", "c = 3", "a = 1"]
     assert all(isinstance(notebook.ycells[index], pycrdt.Map) for index in range(3))
     assert (await transport.get_cell(2))["source"] == "a = 1"
+
+
+async def test_collaborative_output_update_preserves_concurrent_source_edit(monkeypatch):
+    doc_a = pycrdt.Doc()
+    notebook_a = YNotebook(doc_a)
+    with doc_a.transaction():
+        ycell = notebook_a.create_ycell(make_code_cell_dict("initial", None, None))
+        notebook_a.ycells.append(ycell)
+        cell_id = ycell["id"]
+
+    doc_b = pycrdt.Doc()
+    doc_b.apply_update(doc_a.get_update())
+    notebook_b = YNotebook(doc_b)
+    state_a = doc_a.get_state()
+    state_b = doc_b.get_state()
+
+    transport_a = CollabYjsDocumentTransport("http://unused", "shared.ipynb")
+    transport_a._doc = doc_a
+    transport_a._ynb = notebook_a
+    transport_a._cells = notebook_a.ycells
+    transport_b = CollabYjsDocumentTransport("http://unused", "shared.ipynb")
+    transport_b._doc = doc_b
+    transport_b._ynb = notebook_b
+    transport_b._cells = notebook_b.ycells
+    for transport in (transport_a, transport_b):
+        transport._initial_sync_done.set()
+        monkeypatch.setattr(transport, "_broadcast_update", AsyncMock())
+
+    await transport_b.set_cell_source_by_id(cell_id, "collaborator edit", expected_source="initial")
+    await transport_a.update_cell_outputs_by_id(
+        cell_id,
+        [{"output_type": "stream", "name": "stdout", "text": "done\n"}],
+        1,
+        expected_source="initial",
+    )
+
+    doc_a.apply_update(doc_b.get_update(state_b))
+    doc_b.apply_update(doc_a.get_update(state_a))
+    for transport in (transport_a, transport_b):
+        cell = await transport.get_cell_by_id(cell_id)
+        assert cell["source"] == "collaborator edit"
+        assert cell["outputs"][0]["text"] == "done\n"
+
+
+async def test_collaborative_placeholder_cleanup_preserves_meaningful_blank_cell(monkeypatch):
+    transport = CollabYjsDocumentTransport("http://unused", "blank.ipynb")
+    doc = pycrdt.Doc()
+    notebook = YNotebook(doc)
+    transport._doc = doc
+    transport._ynb = notebook
+    transport._cells = notebook.ycells
+    monkeypatch.setattr(transport, "_broadcast_update", AsyncMock())
+    with doc.transaction():
+        notebook.ycells.append(
+            notebook.create_ycell(
+                {
+                    **make_code_cell_dict("", {"tags": ["keep"]}, None),
+                    "outputs": [{"output_type": "stream", "name": "stdout", "text": "saved"}],
+                }
+            )
+        )
+
+    await transport._strip_default_empty_cell()
+
+    assert await transport.cell_count() == 1
+    assert (await transport.get_cell(0))["metadata"]["tags"] == ["keep"]
+
+
+async def test_run_at_keeps_original_cell_identity_during_reorder(tmp_path):
+    class ReorderingDocument(LocalFileDocumentTransport):
+        async def set_cell_source_by_id(self, cell_id, source, *, expected_source=None):
+            await self.insert_markdown_cell(0, "# collaborator")
+            return await super().set_cell_source_by_id(
+                cell_id,
+                source,
+                expected_source=expected_source,
+            )
+
+    async def no_mutation():
+        return None
+
+    doc = ReorderingDocument(str(tmp_path / "reorder.ipynb"))
+    async with NotebookSession(kernel=MutatingKernel(no_mutation), doc=doc) as session:
+        await doc.append_code_cell("original")
+        original_id = (await doc.get_cell(0))["id"]
+        result = await session.run_at(0, "updated")
+
+    assert result.cell_id == original_id
+    assert (await doc.get_cell(0))["cell_type"] == "markdown"
+    assert (await doc.get_cell(1))["source"] == "updated"
+
+
+async def test_validation_is_non_mutating_and_normalization_is_explicit():
+    notebook = nbformat.v4.new_notebook()
+    first = nbformat.v4.new_code_cell("a = 1", id="duplicate")
+    second = nbformat.v4.new_code_cell("b = 2", id="duplicate")
+    notebook.cells.extend([first, second])
+
+    with pytest.raises(ValueError, match="Duplicate notebook cell id"):
+        validate_notebook(notebook)
+    assert [cell.id for cell in notebook.cells] == ["duplicate", "duplicate"]
+
+    with pytest.warns(DuplicateCellId, match="Non-unique cell id"):
+        changes, normalized = normalize_notebook(notebook)
+    assert changes == 1
+    assert normalized.cells[0].id != normalized.cells[1].id
+    assert [cell.id for cell in notebook.cells] == ["duplicate", "duplicate"]
+
+
+async def test_collaboration_send_failure_is_reported_as_persistence_error():
+    doc = pycrdt.Doc()
+    notebook = YNotebook(doc)
+    with doc.transaction():
+        ycell = notebook.create_ycell(make_code_cell_dict("print('value')", None, None))
+        notebook.ycells.append(ycell)
+        cell_id = ycell["id"]
+
+    transport = CollabYjsDocumentTransport("http://unused", "offline.ipynb")
+    transport._doc = doc
+    transport._ynb = notebook
+    transport._cells = notebook.ycells
+    transport._initial_sync_done.set()
+    transport._last_broadcast_state = doc.get_state()
+    transport._ws = SimpleNamespace(
+        closed=False,
+        send_bytes=AsyncMock(side_effect=OSError("offline")),
+    )
+
+    async def no_mutation():
+        return None
+
+    session = NotebookSession(kernel=MutatingKernel(no_mutation), doc=transport)
+    session._started = True
+    result = await session._execute_with_streaming(
+        "print('value')",
+        0,
+        cell_id=cell_id,
+    )
+
+    assert result.status == "ok"
+    assert result.persistence_status == "error"
+    assert "Could not send collaborative update" in (result.persistence_error or "")
 
 
 class DisplayKernel(MutatingKernel):

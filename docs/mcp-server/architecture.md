@@ -155,6 +155,11 @@ doc = create_notebook_transport("local", notebook_path, prefer_collab=False)
 - **Kernel:** Launches a local kernel process via `jupyter_client`
 - **Document:** Reads/writes the `.ipynb` file directly on the filesystem
 
+`SessionManager.open()` canonicalizes paths and shares one in-flight startup
+task for concurrent requests targeting the same notebook. The session enters
+the registry only after both transports start successfully; failed starts clean
+up partial resources and remain retryable.
+
 ---
 
 ## Lifespan Management

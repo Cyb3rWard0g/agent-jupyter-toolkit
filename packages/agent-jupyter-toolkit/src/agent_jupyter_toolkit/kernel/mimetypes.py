@@ -161,7 +161,7 @@ def deserialize_object(data: dict[str, Any], metadata: dict[str, Any] | None = N
             if mt == mimetype:
                 return deserializer(value, mimetype)
         if mimetype == "application/json":
-            return json.loads(value)
+            return json.loads(value) if isinstance(value, (str, bytes, bytearray)) else value
         if mimetype == "application/python-pickle":
             log.warning("Using pickle for deserialization. Only use with trusted data.")
             return pickle.loads(bytes.fromhex(value))

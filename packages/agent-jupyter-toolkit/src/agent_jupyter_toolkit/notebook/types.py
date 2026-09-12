@@ -49,6 +49,9 @@ class NotebookCodeExecutionResult:
     kernel_generation: int = 0
     output_truncated: bool = False
     dropped_output_bytes: int = 0
+    callback_snapshots_coalesced: int = 0
+    callback_status: str = "not-requested"
+    callback_error: str | None = None
     outcome: str = "completed"
     timed_out: bool = False
 

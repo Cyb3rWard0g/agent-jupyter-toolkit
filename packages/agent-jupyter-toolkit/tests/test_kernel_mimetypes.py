@@ -36,3 +36,10 @@ async def test_serialization_survives_json_transport_boundary():
     assert serialization.deserialize_value(transported["data"], transported["metadata"]) == {
         "items": [1, 2, 3]
     }
+
+
+async def test_deserialization_accepts_native_json_mime_values():
+    assert serialization.deserialize_value(
+        {"application/json": {"items": [1, 2, 3]}},
+        {},
+    ) == {"items": [1, 2, 3]}

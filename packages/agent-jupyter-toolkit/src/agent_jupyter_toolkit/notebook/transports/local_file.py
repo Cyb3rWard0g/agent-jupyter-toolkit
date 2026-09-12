@@ -24,6 +24,7 @@ from nbformat.notebooknode import NotebookNode
 
 from ..transport import NotebookDocumentTransport
 from ..types import CellDeletedError, CellSourceChangedError
+from ..utils import validate_notebook
 
 log = logging.getLogger(__name__)
 
@@ -192,6 +193,16 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
         """
         Append a code cell and return its zero-based index.
         """
+        index, _ = await self.append_code_cell_with_id(source, metadata=metadata, tags=tags)
+        return index
+
+    async def append_code_cell_with_id(
+        self,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> tuple[int, str]:
+        """Append a code cell and return its index and ID atomically."""
         async with self._lock:
             nb = self._load_nb()
             cell = nbformat.v4.new_code_cell(source)
@@ -204,9 +215,17 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
             nb.cells.append(cell)
             await self._queue_write(nb)
             idx = len(nb.cells) - 1
+            cell_id = str(cell["id"])
         for cb in self._on_change:
-            cb({"op": "cells-mutated", "kind": "append_code", "index": idx})
-        return idx
+            cb(
+                {
+                    "op": "cells-mutated",
+                    "kind": "append_code",
+                    "index": idx,
+                    "cell_id": cell_id,
+                }
+            )
+        return idx, cell_id
 
     async def insert_code_cell(
         self,
@@ -389,6 +408,38 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
         for cb in self._on_change:
             cb({"op": "cells-mutated", "kind": "set_source", "index": index})
 
+    async def set_cell_source_by_id(
+        self,
+        cell_id: str,
+        source: str,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Resolve, verify, and update a cell under one file lock."""
+        async with self._lock:
+            nb = self._load_nb()
+            for index, cell in enumerate(nb.cells):
+                if cell.get("id") != cell_id:
+                    continue
+                matched_index = index
+                if expected_source is not None and cell.get("source") != expected_source:
+                    raise CellSourceChangedError(f"Cell {cell_id!r} source changed before update")
+                cell["source"] = source
+                await self._queue_write(nb)
+                break
+            else:
+                raise CellDeletedError(f"Cell {cell_id!r} was deleted")
+        for cb in self._on_change:
+            cb(
+                {
+                    "op": "cells-mutated",
+                    "kind": "set_source",
+                    "index": matched_index,
+                    "cell_id": cell_id,
+                }
+            )
+        return matched_index
+
     async def delete_cell(self, index: int) -> None:
         """
         Delete the cell at `index`.
@@ -500,7 +551,7 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
 
     async def _queue_write(self, nb: NotebookNode) -> None:
         """Persist immediately or debounce writes based on autosave_delay."""
-        nbformat.validate(nb)
+        validate_notebook(nb)
         self._dirty_nb = nb
         if self._autosave_delay is None:
             self._atomic_write(nb)
@@ -540,7 +591,7 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
             - write to a temporary file in the same directory
             - replace the target path in a single operation
         """
-        nbformat.validate(nb)
+        validate_notebook(nb)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_name: str | None = None
         try:

@@ -212,6 +212,10 @@ def make_document_transport(
             """Append code cell (no-op), returns index 0."""
             return 0
 
+        async def append_code_cell_with_id(self, *args, **kwargs) -> tuple[int, str]:
+            """No-op documents cannot create stable notebook cells."""
+            raise RuntimeError("No notebook document is configured")
+
         async def insert_code_cell(self, *args, **kwargs) -> None:
             """Insert code cell (no-op)."""
             ...
@@ -231,6 +235,10 @@ def make_document_transport(
         async def set_cell_source(self, *args, **kwargs) -> None:
             """Set cell source (no-op)."""
             ...
+
+        async def set_cell_source_by_id(self, *args, **kwargs) -> int:
+            """No-op transport has no cells."""
+            raise KeyError("No notebook document is configured")
 
         async def delete_cell(self, *args, **kwargs) -> None:
             """Delete cell (no-op)."""

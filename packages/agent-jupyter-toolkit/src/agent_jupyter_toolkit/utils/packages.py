@@ -9,7 +9,62 @@ import json
 import logging
 from typing import Any
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 logger = logging.getLogger(__name__)
+
+
+_REQUIREMENT_HELPERS = r"""
+from packaging.markers import default_environment as _default_environment
+from packaging.requirements import Requirement as _Requirement
+from packaging.utils import canonicalize_name as _canonicalize_name
+
+def _dist_satisfies(req, *, evaluate_marker=True):
+    if evaluate_marker and req.marker is not None and not req.marker.evaluate():
+        return True
+    try:
+        version = _im.version(req.name)
+    except _im.PackageNotFoundError:
+        return False
+    return not req.specifier or req.specifier.contains(version, prereleases=True)
+
+def requirement_satisfied(raw):
+    req = _Requirement(raw)
+    if not _dist_satisfies(req):
+        return False
+    if not req.extras:
+        return True
+    dist = _im.distribution(req.name)
+    provided = {
+        _canonicalize_name(extra)
+        for extra in (dist.metadata.get_all("Provides-Extra") or ())
+    }
+    if not {_canonicalize_name(extra) for extra in req.extras}.issubset(provided):
+        return False
+    for extra in req.extras:
+        environment = _default_environment()
+        environment["extra"] = extra
+        for dependency in dist.requires or ():
+            dep = _Requirement(dependency)
+            if dep.marker is not None and not dep.marker.evaluate(environment):
+                continue
+            if not _dist_satisfies(dep, evaluate_marker=False):
+                return False
+    return True
+
+def requirement_name(raw):
+    return _Requirement(raw).name
+"""
+
+
+def _validate_requirements(packages: list[str]) -> None:
+    if not isinstance(packages, list) or not all(isinstance(package, str) for package in packages):
+        raise TypeError("packages must be a list of PEP 508 requirement strings")
+    for package in packages:
+        try:
+            Requirement(package)
+        except InvalidRequirement as exc:
+            raise ValueError(f"Invalid package requirement: {package!r}") from exc
 
 
 async def _run_json(session, code: str, *, timeout: float) -> dict[str, Any]:
@@ -60,27 +115,17 @@ async def check_package_availability(
     Raises:
         RuntimeError if kernel did not produce valid JSON as the last stdout line.
     """
-    # Strip extras generically inside the kernel and query metadata.
-    # No alias maps; we check exactly the distributions you requested.
+    _validate_requirements(packages)
     code = f"""
 import importlib.metadata as _im
-import json, re
+import json
 
 PKGS = {packages!r}
-
-def base_name(name: str) -> str:
-    # strip extras (e.g., 'pkg[extra1,extra2]' -> 'pkg')
-    i = name.find('[')
-    return name if i < 0 else name[:i]
+{_REQUIREMENT_HELPERS}
 
 status = {{}}
 for p in PKGS:
-    dist = base_name(p)
-    try:
-        _ = _im.version(dist)
-        status[p] = True
-    except _im.PackageNotFoundError:
-        status[p] = False
+    status[p] = requirement_satisfied(p)
 
 print(json.dumps(status))
 """
@@ -112,23 +157,16 @@ async def ensure_packages_with_report(
     Raises:
         RuntimeError if kernel did not produce valid JSON as the last stdout line.
     """
+    _validate_requirements(packages)
     code = f"""
 import sys, subprocess, json, shutil
 import importlib.metadata as _im
 
 PKGS = {packages!r}
-
-def base_name(name: str) -> str:
-    i = name.find('[')
-    return name if i < 0 else name[:i]
+{_REQUIREMENT_HELPERS}
 
 def is_installed(pip_name: str) -> bool:
-    dist = base_name(pip_name)
-    try:
-        _im.version(dist)
-        return True
-    except _im.PackageNotFoundError:
-        return False
+    return requirement_satisfied(pip_name)
 
 def _has_pip() -> bool:
     try:
@@ -264,29 +302,22 @@ async def uninstall_packages(
           }
         }
     """
+    _validate_requirements(packages)
     code = f"""
 import sys, subprocess, json, shutil
 import importlib.metadata as _im
 
 PKGS = {packages!r}
-
-def base_name(name: str) -> str:
-    i = name.find('[')
-    return name if i < 0 else name[:i]
+{_REQUIREMENT_HELPERS}
 
 def is_installed(pip_name: str) -> bool:
-    dist = base_name(pip_name)
-    try:
-        _im.version(dist)
-        return True
-    except _im.PackageNotFoundError:
-        return False
+    return requirement_satisfied(pip_name)
 
 def _uninstall_cmd(pip_name: str) -> list[str]:
     uv = shutil.which("uv")
     if uv:
-        return [uv, "pip", "uninstall", "--python", sys.executable, pip_name]
-    return [sys.executable, "-m", "pip", "uninstall", pip_name, "-y"]
+        return [uv, "pip", "uninstall", "--python", sys.executable, requirement_name(pip_name)]
+    return [sys.executable, "-m", "pip", "uninstall", requirement_name(pip_name), "-y"]
 
 rep = {{}}
 for pip_name in PKGS:
@@ -341,21 +372,18 @@ async def get_package_versions(
     Returns:
         { "pkg": "1.2.3" | None, ... }
     """
+    _validate_requirements(packages)
     code = f"""
 import importlib.metadata as _im
 import json
 
 PKGS = {packages!r}
-
-def base_name(name: str) -> str:
-    i = name.find('[')
-    return name if i < 0 else name[:i]
+{_REQUIREMENT_HELPERS}
 
 versions = {{}}
 for p in PKGS:
-    dist = base_name(p)
     try:
-        versions[p] = _im.version(dist)
+        versions[p] = _im.version(requirement_name(p))
     except _im.PackageNotFoundError:
         versions[p] = None
 

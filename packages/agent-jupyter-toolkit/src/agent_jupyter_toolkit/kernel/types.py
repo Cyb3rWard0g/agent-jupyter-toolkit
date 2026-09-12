@@ -65,6 +65,7 @@ class ServerConfig:
     request_timeout: float = 30.0
     startup_timeout: float = 60.0
     max_output_bytes: int | None = 50 * 1024 * 1024
+    output_callback_timeout: float | None = 30.0
 
 
 @dataclass
@@ -90,6 +91,7 @@ class SessionConfig:
     env: dict[str, str] | None = None
     kernel_args: list[str] = field(default_factory=list)
     max_output_bytes: int | None = 50 * 1024 * 1024
+    output_callback_timeout: float | None = 30.0
     transport_encryption: str = "disabled"
     manager_factory: Callable[..., Any] | None = None
     server: ServerConfig | None = None
@@ -146,6 +148,8 @@ class ExecutionResult:
     output_truncated: bool = False
     dropped_output_bytes: int = 0
     callback_snapshots_coalesced: int = 0
+    callback_status: str = "not-requested"
+    callback_error: str | None = None
     display_ids: dict[str, list[int]] = field(default_factory=dict)
     display_updates: dict[str, dict[str, Any]] = field(default_factory=dict)
     outcome: str = "completed"

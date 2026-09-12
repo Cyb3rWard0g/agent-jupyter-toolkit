@@ -313,3 +313,93 @@ def register_kernel_tools(
             return {"ok": True}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        title="Create Kernel Subshell",
+        annotations=ToolAnnotations(
+            title="Create Kernel Subshell",
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+    )
+    async def notebook_subshell_create(
+        ctx: Context,
+        notebook_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a subshell when the kernel advertises subshell support."""
+        session = get_session(ctx, notebook_path)
+        try:
+            subshell_id = await session.kernel.create_subshell()
+            return {"ok": True, "subshell_id": subshell_id}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        title="List Kernel Subshells",
+        annotations=ToolAnnotations(
+            title="List Kernel Subshells",
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+    )
+    async def notebook_subshell_list(
+        ctx: Context,
+        notebook_path: str | None = None,
+    ) -> dict[str, Any]:
+        """List subshells when the kernel advertises subshell support."""
+        session = get_session(ctx, notebook_path)
+        try:
+            subshell_ids = await session.kernel.list_subshells()
+            return {"ok": True, "subshell_ids": subshell_ids}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        title="Delete Kernel Subshell",
+        annotations=ToolAnnotations(
+            title="Delete Kernel Subshell",
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+    )
+    async def notebook_subshell_delete(
+        subshell_id: str,
+        ctx: Context,
+        notebook_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete a kernel subshell by ID."""
+        session = get_session(ctx, notebook_path)
+        try:
+            await session.kernel.delete_subshell(subshell_id)
+            return {"ok": True, "subshell_id": subshell_id}
+        except Exception as exc:
+            return {"ok": False, "subshell_id": subshell_id, "error": str(exc)}
+
+    @mcp.tool(
+        title="Kernel Debug Request",
+        annotations=ToolAnnotations(
+            title="Kernel Debug Request",
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+    )
+    async def notebook_debug_request(
+        request: dict[str, Any],
+        ctx: Context,
+        notebook_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a Debug Adapter Protocol request to a capable kernel."""
+        session = get_session(ctx, notebook_path)
+        try:
+            response = await session.kernel.debug(request)
+            return {"ok": response.get("success", True), "response": response}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}

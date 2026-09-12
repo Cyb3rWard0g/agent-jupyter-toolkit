@@ -217,12 +217,44 @@ async def test_install_packages_tracks_in_metadata(tmp_path):
     assert deps["pandas"]["version"] == "2.1.0"
     assert "numpy" in deps
     assert deps["numpy"]["version"] == "1.26.0"
+    assert deps["pandas"]["requirement"] == "pandas"
     assert "installed_at" in deps["pandas"]
 
     # Verify on disk
     on_disk = nbformat.read(nb_path, as_version=4)
     assert "agent_dependencies" in on_disk.metadata
     assert on_disk.metadata["agent_dependencies"]["pandas"]["version"] == "2.1.0"
+
+
+async def test_dependency_tracking_uses_distribution_identity_for_specifiers(tmp_path):
+    nb_path = tmp_path / "specified-deps.ipynb"
+    nbformat.write(nbformat.v4.new_notebook(), nb_path)
+    session = NotebookSession(
+        kernel=_make_mock_kernel(),
+        doc=make_document_transport(
+            mode="local",
+            local_path=str(nb_path),
+            remote_base=None,
+            remote_path=None,
+            token=None,
+            headers_json=None,
+        ),
+    )
+    await session.start()
+
+    with patch(
+        "agent_jupyter_toolkit.utils.packages.get_package_versions",
+        new=AsyncMock(return_value={"Pandas[excel]>=2": "2.3.0"}),
+    ):
+        await session._track_dependencies(["Pandas[excel]>=2"])
+
+    dependencies = await session.get_tracked_dependencies()
+    assert list(dependencies) == ["pandas"]
+    assert dependencies["pandas"]["requirement"] == "Pandas[excel]>=2"
+    assert dependencies["pandas"]["version"] == "2.3.0"
+
+    await session._untrack_dependencies(["pandas<3"])
+    assert await session.get_tracked_dependencies() == {}
 
 
 async def test_install_packages_no_track_skips_metadata(tmp_path):

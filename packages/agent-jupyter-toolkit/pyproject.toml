@@ -31,6 +31,7 @@ dependencies = [
   "pycrdt>=0.12.46",
   "jupyter-core>=5.9.1",
   "jupyter-ydoc>=3.4.0",
+  "packaging>=25.0",
 ]
 
 [project.optional-dependencies]

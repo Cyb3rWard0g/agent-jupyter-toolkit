@@ -22,10 +22,11 @@ class KernelTransport:
     Minimal async interface for executing code in a Jupyter kernel.
 
     Implementations:
-    - MUST call `output_callback(outputs_so_far, exec_count)` after each IOPub
-        message that changes visible state (execute_input, stream, display_data,
-        execute_result, clear_output, error), in order, if a callback is provided.
-    - SHOULD also call it once at the end to deliver the final snapshot.
+    - MUST deliver ordered, cumulative snapshots to ``output_callback`` without
+        blocking kernel message collection. Implementations may coalesce pending
+        snapshots when the callback is slower than the kernel.
+    - MUST attempt one final snapshot and report callback delivery diagnostics on
+        ``ExecutionResult`` without changing the kernel execution status.
     """
 
     async def start(self) -> None:
@@ -54,6 +55,7 @@ class KernelTransport:
         store_history: bool = True,
         user_expressions: dict | None = None,
         metadata: dict | None = None,
+        subshell_id: str | None = None,
         allow_stdin: bool = False,
         stop_on_error: bool = True,
     ) -> ExecutionResult:
@@ -61,21 +63,39 @@ class KernelTransport:
         Execute code and (optionally) stream outputs via `output_callback`.
 
         Semantics:
-        - If provided, `output_callback` is awaited *in order* after each IOPub message
-            that changes the cell's visible state, passing the cumulative outputs and
-            the latest execution_count (or None if not yet known).
+        - If provided, ``output_callback`` receives ordered cumulative snapshots.
+            Pending snapshots may be coalesced when the callback is slower than
+            message intake; the newest state and final state are retained.
         - `timeout` applies to the overall cell execution
 
         Call-order and shape guarantees:
-        - Order: Calls to `output_callback` are strictly ordered as messages arrive.
+        - Order: Delivered calls are strictly ordered as messages arrive.
         - Shape: `outputs` is nbformat-like (dicts with `output_type`, `data`, `metadata`, etc.).
             It represents the *current* state (e.g., after a `clear_output`, the list may become
             empty).
         - Count: `execution_count` may be `None` until the kernel emits `execute_input`.
-        - Final snapshot: The callback is typically invoked again with the final set once
-          the request is complete.
+        - Final snapshot: A final delivery is attempted when the request completes.
+        - Diagnostics: Callback timeout/failure is reported separately through
+          ``callback_status``, ``callback_error``, and
+          ``callback_snapshots_coalesced``.
         """
         ...
+
+    async def debug(self, request: dict) -> dict:
+        """Send a Debug Adapter Protocol request to a capable kernel."""
+        raise NotImplementedError
+
+    async def create_subshell(self) -> str:
+        """Create a kernel subshell and return its stable ID."""
+        raise NotImplementedError
+
+    async def delete_subshell(self, subshell_id: str) -> None:
+        """Delete a kernel subshell."""
+        raise NotImplementedError
+
+    async def list_subshells(self) -> list[str]:
+        """Return the IDs of active kernel subshells."""
+        raise NotImplementedError
 
     # ── Introspection / control ──────────────────────────────────────────
 

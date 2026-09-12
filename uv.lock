@@ -43,6 +43,7 @@ dependencies = [
     { name = "jupyter-core" },
     { name = "jupyter-ydoc" },
     { name = "nbformat" },
+    { name = "packaging" },
     { name = "pycrdt" },
     { name = "yarl" },
 ]
@@ -88,6 +89,7 @@ requires-dist = [
     { name = "jupyter-ydoc", specifier = ">=3.4.0" },
     { name = "nbclient", marker = "extra == 'batch'", specifier = ">=0.11.0" },
     { name = "nbformat", specifier = ">=5.11.1" },
+    { name = "packaging", specifier = ">=25.0" },
     { name = "pandas", marker = "extra == 'dataframe'", specifier = ">=3.0.1" },
     { name = "pyarrow", marker = "extra == 'dataframe'", specifier = ">=23.0.1" },
     { name = "pycrdt", specifier = ">=0.12.46" },

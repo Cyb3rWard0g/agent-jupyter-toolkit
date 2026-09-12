@@ -26,6 +26,7 @@ def create_kernel(
     env: dict[str, str] | None = None,
     kernel_args: list[str] | None = None,
     max_output_bytes: int | None = 50 * 1024 * 1024,
+    output_callback_timeout: float | None = 30.0,
     transport_encryption: str = "disabled",
     # Remote options
     base_url: str | None = None,
@@ -73,6 +74,7 @@ def create_kernel(
                 env=env,
                 kernel_args=list(kernel_args or []),
                 max_output_bytes=max_output_bytes,
+                output_callback_timeout=output_callback_timeout,
                 transport_encryption=transport_encryption,
             )
         )
@@ -91,6 +93,7 @@ def create_kernel(
                     kernel_name=kernel_name,
                     notebook_path=notebook_path,
                     max_output_bytes=max_output_bytes,
+                    output_callback_timeout=output_callback_timeout,
                 ),
             )
         )

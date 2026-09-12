@@ -49,6 +49,7 @@ async def execute(
     store_history: bool = True,
     user_expressions: dict | None = None,
     metadata: dict | None = None,
+    subshell_id: str | None = None,
     allow_stdin: bool = False,
     stop_on_error: bool = True,
 ) -> ExecutionResult
@@ -69,6 +70,15 @@ async def execute(
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `interrupt()` | `async def interrupt() -> None` | Send SIGINT to kernel |
+| `restart()` | `async def restart() -> None` | Restart the kernel and increment its generation |
+| `create_subshell()` | `async def create_subshell() -> str` | Create an advertised kernel subshell |
+| `list_subshells()` | `async def list_subshells() -> list[str]` | List active subshell IDs |
+| `delete_subshell(id)` | `async def delete_subshell(subshell_id: str) -> None` | Delete a subshell |
+| `debug(request)` | `async def debug(request: dict) -> dict` | Send a DAP control request to an advertised debugger |
+
+Optional workflows raise `UnsupportedKernelCapabilityError` unless the kernel
+lists the corresponding `"kernel subshells"` or `"debugger"` feature in its
+kernel-info reply.
 
 #### Properties
 
@@ -92,6 +102,7 @@ class SessionConfig:
     env: dict[str, str] | None = None
     kernel_args: list[str] = field(default_factory=list)
     max_output_bytes: int | None = 50 * 1024 * 1024
+    output_callback_timeout: float | None = 30.0
     transport_encryption: str = "disabled"
     manager_factory: Callable[..., Any] | None = None
     server: ServerConfig | None = None
@@ -110,6 +121,7 @@ class ServerConfig:
     request_timeout: float = 30.0
     startup_timeout: float = 60.0
     max_output_bytes: int | None = 50 * 1024 * 1024
+    output_callback_timeout: float | None = 30.0
 ```
 
 ### `SessionInfo`
@@ -149,6 +161,8 @@ class ExecutionResult:
     output_truncated: bool = False
     dropped_output_bytes: int = 0
     callback_snapshots_coalesced: int = 0
+    callback_status: str = "not-requested"
+    callback_error: str | None = None
     outcome: str = "completed"
     timed_out: bool = False
 ```
@@ -289,10 +303,13 @@ Low-level kernel process manager (wraps `AsyncKernelManager`).
 ```python
 class VariableManager:
     def __init__(self, session: Session, language: str = "python"): ...
-    async def set(self, name: str, value: Any, mimetype=None) -> None: ...
+    async def set(self, name: str, value: Any, mimetype: str | None = None) -> None: ...
     async def get(self, name: str) -> Any: ...
     async def list(self, *, detailed: bool = False) -> list[str] | list[VariableDescription]: ...
 ```
+
+`set()` and `get()` use a strict JSON transfer contract. `mimetype`, when
+provided, must be `application/json`.
 
 ---
 
@@ -356,11 +373,13 @@ Runtime-checkable protocol for notebook document operations.
 | `fetch()` | `async def fetch() -> dict` | Get notebook as nbformat dict |
 | `save(content)` | `async def save(dict) -> None` | Persist notebook |
 | `append_code_cell(source, ...)` | `async def ... -> int` | Append code cell |
+| `append_code_cell_with_id(source, ...)` | `async def ... -> tuple[int, str]` | Append and capture its stable ID in one mutation |
 | `insert_code_cell(index, source, ...)` | `async def ... -> None` | Insert code cell |
 | `append_markdown_cell(source, ...)` | `async def ... -> int` | Append markdown cell |
 | `insert_markdown_cell(index, source, ...)` | `async def ... -> None` | Insert markdown cell |
 | `update_cell_outputs(index, outputs, count)` | `async def ... -> None` | Replace cell outputs |
 | `set_cell_source(index, source)` | `async def ... -> None` | Replace cell source |
+| `set_cell_source_by_id(cell_id, source, expected_source=None)` | `async def ... -> int` | Resolve, verify, and replace source in one mutation |
 | `get_cell(index)` | `async def ... -> dict` | Read a single cell |
 | `cell_count()` | `async def ... -> int` | Count cells |
 | `get_cell_source(index)` | `async def ... -> str` | Read source text only |
@@ -490,7 +509,9 @@ def create_notebook_transport(mode, path, *, base_url=None, ...) -> NotebookDocu
 ### Execution Functions
 
 ```python
-async def execute_code(session, code, *, timeout=120.0, format_outputs=True)
+async def execute_code(
+    session, code, *, timeout=120.0, format_outputs=True, subshell_id=None
+)
     -> NotebookCodeExecutionResult
 
 async def invoke_code_cell(notebook_session, code, *, timeout=120.0, format_outputs=True)
@@ -540,9 +561,24 @@ DATA_VIZ_PACKAGES: list[str]
 WEB_PACKAGES: list[str]
 ```
 
+Package arguments are PEP 508 requirement strings. Availability checks honor
+versions, markers, and extras in the kernel environment.
+
 ### Notebook File Helpers
 
 ```python
 def create_minimal_notebook_content() -> dict
 async def create_notebook_via_contents_api(base_url, path, token=None, headers=None) -> None
 ```
+
+### Notebook Validation
+
+```python
+def validate_notebook(notebook) -> None
+def normalize_notebook(
+    notebook, *, strip_invalid_metadata=False
+) -> tuple[int, NotebookNode]
+```
+
+Validation is non-mutating. Normalization returns a repaired copy and the
+number of changes.

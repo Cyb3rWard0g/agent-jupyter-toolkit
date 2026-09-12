@@ -5,10 +5,17 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from agent_jupyter_toolkit.kernel import SessionConfig, create_session
+from agent_jupyter_toolkit.kernel import (
+    KernelInfoResult,
+    SessionConfig,
+    UnsupportedKernelCapabilityError,
+    create_session,
+)
 from agent_jupyter_toolkit.kernel.execution_state import ExecutionState
 from agent_jupyter_toolkit.kernel.messages import fold_iopub_events
 from agent_jupyter_toolkit.kernel.transports.local import LocalTransport
+from agent_jupyter_toolkit.kernel.transports.server import ServerTransport
+from agent_jupyter_toolkit.kernel.types import ServerConfig
 
 pytestmark = pytest.mark.asyncio
 
@@ -252,3 +259,119 @@ async def test_cancelling_execution_cancels_a_blocked_output_callback():
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 1)
     assert not any(t.get_name() == "ajt-output-callback" for t in asyncio.all_tasks())
+
+
+async def test_callback_self_cancellation_does_not_deadlock_execution():
+    async def callback(*_args):
+        raise asyncio.CancelledError
+
+    async def execute_interactive(*_args, output_hook, **_kwargs):
+        output_hook({"msg_type": "stream", "content": {"name": "stdout", "text": "first"}})
+        return {"content": {"status": "ok", "execution_count": 1}}
+
+    transport = LocalTransport()
+    transport.kernel_manager._kc = SimpleNamespace(
+        execute=Mock(), execute_interactive=AsyncMock(side_effect=execute_interactive)
+    )
+    result = await asyncio.wait_for(transport.execute("code", output_callback=callback), 1)
+
+    assert result.status == "ok"
+    assert result.callback_status == "error"
+    assert "CancelledError" in (result.callback_error or "")
+
+
+async def test_callback_timeout_is_reported_without_changing_kernel_status():
+    blocked = asyncio.Event()
+
+    async def callback(*_args):
+        await blocked.wait()
+
+    async def execute_interactive(*_args, output_hook, **_kwargs):
+        output_hook({"msg_type": "stream", "content": {"name": "stdout", "text": "first"}})
+        return {"content": {"status": "ok", "execution_count": 1}}
+
+    transport = LocalTransport(output_callback_timeout=0.01)
+    transport.kernel_manager._kc = SimpleNamespace(
+        execute=Mock(), execute_interactive=AsyncMock(side_effect=execute_interactive)
+    )
+    result = await asyncio.wait_for(transport.execute("code", output_callback=callback), 1)
+
+    assert result.status == "ok"
+    assert result.callback_status == "error"
+    assert "TimeoutError" in (result.callback_error or "")
+
+
+async def test_execution_state_coalesces_stream_chunks_without_losing_text():
+    state = ExecutionState()
+    for _ in range(1_000):
+        state.apply({"msg_type": "stream", "content": {"name": "stdout", "text": "x"}})
+
+    assert state.snapshot()[0][0]["text"] == "x" * 1_000
+    assert state.result().stdout == "x" * 1_000
+
+
+async def test_optional_kernel_workflows_are_capability_gated(monkeypatch):
+    transport = LocalTransport()
+    monkeypatch.setattr(
+        transport,
+        "kernel_info",
+        AsyncMock(return_value=KernelInfoResult(supported_features=[])),
+    )
+
+    with pytest.raises(UnsupportedKernelCapabilityError, match="kernel subshells"):
+        await transport.create_subshell()
+    with pytest.raises(UnsupportedKernelCapabilityError, match="debugger"):
+        await transport.debug({"seq": 1, "type": "request", "command": "debugInfo"})
+
+
+async def test_local_control_request_does_not_wait_for_shell_request_lock():
+    transport = LocalTransport()
+    transport._supported_features = {"debugger"}
+    message = {"header": {"msg_id": "debug-1"}}
+    client = SimpleNamespace(
+        session=SimpleNamespace(msg=Mock(return_value=message)),
+        control_channel=SimpleNamespace(send=Mock()),
+        _recv_reply=AsyncMock(return_value={"content": {"success": True, "command": "debugInfo"}}),
+    )
+    transport.kernel_manager._kc = client
+
+    async with transport._request_lock:
+        result = await asyncio.wait_for(
+            transport.debug({"seq": 1, "type": "request", "command": "debugInfo"}),
+            1,
+        )
+
+    assert result["success"] is True
+    client.control_channel.send.assert_called_once_with(message)
+
+
+async def test_server_routes_control_reply_while_execution_lock_is_held():
+    transport = ServerTransport(ServerConfig(base_url="http://unused"))
+    transport._session = SimpleNamespace()
+    transport._kernel_id = "kernel-1"
+    transport._supported_features = {"debugger"}
+    transport._ws = SimpleNamespace(
+        closed=False,
+        send_json=AsyncMock(),
+        send_bytes=AsyncMock(),
+    )
+
+    async with transport._exec_lock:
+        task = asyncio.create_task(
+            transport.debug({"seq": 1, "type": "request", "command": "debugInfo"})
+        )
+        for _ in range(10):
+            if transport._ws.send_json.await_count:
+                break
+            await asyncio.sleep(0)
+        request = transport._ws.send_json.await_args.args[0]
+        await transport._dispatch_frame(
+            {
+                "header": {"msg_type": "debug_reply"},
+                "parent_header": {"msg_id": request["header"]["msg_id"]},
+                "content": {"success": True, "command": "debugInfo"},
+            }
+        )
+        result = await asyncio.wait_for(task, 1)
+
+    assert result["success"] is True

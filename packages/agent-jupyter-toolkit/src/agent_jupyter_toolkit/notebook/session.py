@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -67,6 +68,7 @@ class NotebookSession:
         default_factory=dict, init=False, repr=False
     )
     _display_generation: int | None = field(default=None, init=False, repr=False)
+    _workflow_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     # --------------------------------------------------------------------- lifecycle
 
@@ -324,6 +326,21 @@ class NotebookSession:
         metadata: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> tuple[int, ExecutionResult]:
+        """Append and execute one cell as a serialized notebook workflow."""
+        async with self._workflow_lock:
+            return await self._append_and_run_locked(
+                code,
+                metadata=metadata,
+                timeout=timeout,
+            )
+
+    async def _append_and_run_locked(
+        self,
+        code: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, ExecutionResult]:
         """
         Append a code cell and execute it with real-time output streaming.
 
@@ -352,10 +369,13 @@ class NotebookSession:
 
         await self._ensure_started()
 
-        # Create the cell first so we have a stable index to update
-        idx = await self.doc.append_code_cell(code, metadata=metadata)
-        cell = await self.doc.get_cell(idx)
-        cell_id = cell.get("id")
+        # Create the cell and capture its stable ID in the same document mutation.
+        appender = getattr(self.doc, "append_code_cell_with_id", None)
+        if callable(appender):
+            idx, cell_id = await appender(code, metadata=metadata)
+        else:
+            idx = await self.doc.append_code_cell(code, metadata=metadata)
+            cell_id = (await self.doc.get_cell(idx)).get("id")
         logger.debug(f"[append_and_run] Appended cell at index: {idx}")
 
         # Execute with streaming using the centralized helper
@@ -367,6 +387,17 @@ class NotebookSession:
         return idx, result
 
     async def run_at(
+        self,
+        index: int,
+        code: str,
+        *,
+        timeout: float | None = None,
+    ) -> ExecutionResult:
+        """Update and execute one existing cell as a serialized workflow."""
+        async with self._workflow_lock:
+            return await self._run_at_locked(index, code, timeout=timeout)
+
+    async def _run_at_locked(
         self,
         index: int,
         code: str,
@@ -411,10 +442,20 @@ class NotebookSession:
                 f"notebook_code_run_existing can only target code cells."
             )
 
-        # Update the cell source first
-        await self.doc.set_cell_source(index, code)
-        updated_cell = await self.doc.get_cell(index)
-        cell_id = updated_cell.get("id")
+        cell_id = cell.get("id")
+        current_source = cell.get("source", "")
+        if isinstance(current_source, list):
+            current_source = "".join(str(part) for part in current_source)
+
+        setter = getattr(self.doc, "set_cell_source_by_id", None)
+        if cell_id and callable(setter):
+            index = await setter(
+                cell_id,
+                code,
+                expected_source=str(current_source),
+            )
+        else:
+            await self.doc.set_cell_source(index, code)
 
         # Execute with streaming using the centralized helper
         return await self._execute_with_streaming(
@@ -441,19 +482,30 @@ class NotebookSession:
             print(f"Added markdown cell at index {idx}")
             ```
         """
-        await self._ensure_started()
+        async with self._workflow_lock:
+            await self._ensure_started()
 
-        if index is None:
-            result_index = await self.doc.append_markdown_cell(text)
-        else:
-            await self.doc.insert_markdown_cell(index, text)
-            result_index = index
+            if index is None:
+                result_index = await self.doc.append_markdown_cell(text)
+            else:
+                await self.doc.insert_markdown_cell(index, text)
+                result_index = index
 
-        return result_index
+            return result_index
 
     # --------------------------------------------------------------------- run-all
 
     async def run_all(
+        self,
+        *,
+        stop_on_error: bool = True,
+        timeout: float | None = None,
+    ) -> RunAllResult:
+        """Execute all cells while excluding competing session workflows."""
+        async with self._workflow_lock:
+            return await self._run_all_locked(stop_on_error=stop_on_error, timeout=timeout)
+
+    async def _run_all_locked(
         self,
         *,
         stop_on_error: bool = True,
@@ -656,9 +708,10 @@ class NotebookSession:
                 print("Notebook is fully reproducible!")
             ```
         """
-        await self._ensure_started()
-        await self.kernel.restart()
-        return await self.run_all(stop_on_error=stop_on_error, timeout=timeout)
+        async with self._workflow_lock:
+            await self._ensure_started()
+            await self.kernel.restart()
+            return await self._run_all_locked(stop_on_error=stop_on_error, timeout=timeout)
 
     async def fresh_run_all(
         self,
@@ -798,15 +851,21 @@ class NotebookSession:
 
         This is an internal helper called after a successful install.
         """
+        from packaging.requirements import Requirement
+        from packaging.utils import canonicalize_name
+
         from ..utils.packages import get_package_versions
 
         versions = await get_package_versions(self.kernel, packages, timeout=timeout)
         now = datetime.now(UTC).isoformat()
 
         existing = await self.get_tracked_dependencies()
-        for pkg in packages:
-            existing[pkg] = {
-                "version": versions.get(pkg),
+        for requirement in packages:
+            parsed = Requirement(requirement)
+            package_name = canonicalize_name(parsed.name)
+            existing[package_name] = {
+                "version": versions.get(requirement),
+                "requirement": str(parsed),
                 "installed_at": now,
             }
 
@@ -819,11 +878,21 @@ class NotebookSession:
 
     async def _untrack_dependencies(self, packages: list[str]) -> None:
         """Remove *packages* from the dependency manifest in metadata."""
+        from packaging.requirements import InvalidRequirement, Requirement
+        from packaging.utils import canonicalize_name
+
         existing = await self.get_tracked_dependencies()
+        requested_names = {
+            canonicalize_name(Requirement(requirement).name) for requirement in packages
+        }
         changed = False
-        for pkg in packages:
-            if pkg in existing:
-                del existing[pkg]
+        for key in list(existing):
+            try:
+                stored_name = canonicalize_name(Requirement(key).name)
+            except InvalidRequirement:
+                stored_name = canonicalize_name(key)
+            if stored_name in requested_names:
+                del existing[key]
                 changed = True
         if changed:
             await self.doc.update_metadata({self.DEPS_META_KEY: existing})

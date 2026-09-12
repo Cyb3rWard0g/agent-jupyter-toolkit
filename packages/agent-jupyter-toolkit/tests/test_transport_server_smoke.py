@@ -43,6 +43,36 @@ async def test_server_execute_ok():
 
 
 @skip_server
+async def test_server_optional_control_channel_workflows():
+    cfg = SessionConfig(
+        mode="server",
+        server=ServerConfig(
+            base_url=os.environ["JAT_SERVER_URL"].rstrip("/"),
+            token=os.getenv("JAT_SERVER_TOKEN"),
+            kernel_name="python3",
+        ),
+    )
+    sess = create_session(cfg)
+    await sess.start()
+    subshell_id = None
+    try:
+        info = await sess.kernel_info()
+        if "debugger" in info.supported_features:
+            response = await sess.debug({"seq": 1, "type": "request", "command": "debugInfo"})
+            assert response.get("success") is not False
+        if "kernel subshells" in info.supported_features:
+            subshell_id = await sess.create_subshell()
+            assert subshell_id in await sess.list_subshells()
+            result = await sess.execute("print('remote subshell')", subshell_id=subshell_id)
+            assert result.status == "ok"
+            assert result.stdout == "remote subshell\n"
+    finally:
+        if subshell_id is not None:
+            await sess.delete_subshell(subshell_id)
+        await sess.shutdown()
+
+
+@skip_server
 async def test_server_restart_clears_namespace_and_keeps_session_usable():
     cfg = SessionConfig(
         mode="server",

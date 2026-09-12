@@ -83,13 +83,21 @@ def convert_to_notebook_result(
         kernel_generation=result.kernel_generation,
         output_truncated=result.output_truncated,
         dropped_output_bytes=result.dropped_output_bytes,
+        callback_snapshots_coalesced=result.callback_snapshots_coalesced,
+        callback_status=result.callback_status,
+        callback_error=result.callback_error,
         outcome=result.outcome,
         timed_out=result.timed_out,
     )
 
 
 async def execute_code(
-    kernel_session, code: str, *, timeout: float | None = 120.0, format_outputs: bool = True
+    kernel_session,
+    code: str,
+    *,
+    timeout: float | None = 120.0,
+    format_outputs: bool = True,
+    subshell_id: str | None = None,
 ) -> NotebookCodeExecutionResult:
     """
     Execute code in a kernel session with automatic output processing.
@@ -126,7 +134,7 @@ async def execute_code(
 
         logger.debug("Executing code in kernel session")
 
-        result = await kernel_session.execute(code, timeout=timeout)
+        result = await kernel_session.execute(code, timeout=timeout, subshell_id=subshell_id)
 
         elapsed = time.time() - start_time
         logger.debug(f"Code execution completed in {elapsed:.2f}s, status: {result.status}")

@@ -84,6 +84,7 @@ class Session:
         store_history: bool = True,
         user_expressions: dict | None = None,
         metadata: dict | None = None,
+        subshell_id: str | None = None,
         allow_stdin: bool = False,
         stop_on_error: bool = True,
     ) -> ExecutionResult:
@@ -93,12 +94,10 @@ class Session:
         Args:
             code: Source code to run.
             timeout: Max seconds to wait for completion (None = no timeout).
-            output_callback: If provided, this coroutine is called after each
-                IOPub message that changes visible state, with
-                `(outputs_so_far, execution_count)`. This allows real-time
-                streaming of outputs into a collaborative document transport.
-                Calls are strictly ordered as messages arrive; outputs is nbformat-like.
-                May be invoked multiple times per cell.
+            output_callback: Receives ordered, cumulative nbformat-like output
+                snapshots. Pending snapshots may be coalesced when the callback
+                is slower than kernel message intake. Callback failures are
+                reported on the result separately from execution status.
             store_history: Whether to record execution in kernel history.
             allow_stdin: Whether the kernel may request stdin from this client.
             stop_on_error: Abort the queue if an error occurs in execution.
@@ -115,6 +114,7 @@ class Session:
                 store_history=store_history,
                 user_expressions=user_expressions,
                 metadata=metadata,
+                subshell_id=subshell_id,
                 allow_stdin=allow_stdin,
                 stop_on_error=stop_on_error,
             )
@@ -124,6 +124,22 @@ class Session:
             raise
         result.kernel_generation = self._kernel_generation
         return result
+
+    async def debug(self, request: dict) -> dict:
+        """Send a Debug Adapter Protocol request when the kernel supports it."""
+        return await self._transport.debug(request)
+
+    async def create_subshell(self) -> str:
+        """Create a subshell when advertised by the kernel."""
+        return await self._transport.create_subshell()
+
+    async def delete_subshell(self, subshell_id: str) -> None:
+        """Delete a previously created subshell."""
+        await self._transport.delete_subshell(subshell_id)
+
+    async def list_subshells(self) -> list[str]:
+        """List active subshell IDs."""
+        return await self._transport.list_subshells()
 
     # ── Introspection / control ──────────────────────────────────────────
 
@@ -315,6 +331,7 @@ def create_session(config: SessionConfig | None = None) -> Session:
             env=config.env,
             kernel_args=config.kernel_args,
             max_output_bytes=config.max_output_bytes,
+            output_callback_timeout=config.output_callback_timeout,
             transport_encryption=config.transport_encryption,
             manager_factory=config.manager_factory,
         )

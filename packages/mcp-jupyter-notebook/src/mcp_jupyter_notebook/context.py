@@ -14,6 +14,7 @@ that omit ``notebook_path`` automatically target the default notebook.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +44,11 @@ class SessionManager:
     def __init__(self, config: dict[str, Any], default_path: str | None = None) -> None:
         self._config = config
         self._sessions: dict[str, NotebookSession] = {}
-        self.default_path: str | None = default_path
+        self._opening: dict[str, asyncio.Task[NotebookSession]] = {}
+        self._registry_lock = asyncio.Lock()
+        self.default_path: str | None = (
+            self._session_key(default_path) if default_path is not None else None
+        )
 
     # ── public API ──────────────────────────────────
 
@@ -56,7 +61,7 @@ class SessionManager:
         return len(self._sessions)
 
     def __contains__(self, path: str) -> bool:
-        return path in self._sessions
+        return self._session_key(path) in self._sessions
 
     async def open(self, path: str) -> NotebookSession:
         """Open a notebook, creating a new session if needed.
@@ -79,34 +84,20 @@ class SessionManager:
         RuntimeError
             If the session cannot be created or started.
         """
-        if path in self._sessions:
-            log.debug("Reusing existing session for %s", path)
-            return self._sessions[path]
-
-        # In local mode, resolve the path and create the file if it doesn't exist.
-        if self._config["mode"] == "local":
-            nb_path = Path(path).resolve()
-            if not nb_path.exists():
-                log.info("Creating new notebook: %s", nb_path)
-                nb_path.parent.mkdir(parents=True, exist_ok=True)
-                import nbformat
-
-                nb = nbformat.v4.new_notebook()
-                nbformat.write(nb, str(nb_path))
-            # Normalise to the resolved path for consistent keying
-            path = str(nb_path)
-
-        log.info("Opening notebook session: %s", path)
-        session = self._build_session(path)
-        await session.start()
-        self._sessions[path] = session
-
-        # If no default, make the first opened notebook the default
-        if self.default_path is None:
-            self.default_path = path
-            log.info("Default notebook set to: %s", path)
-
-        return session
+        path = self._session_key(path)
+        async with self._registry_lock:
+            existing = self._sessions.get(path)
+            if existing is not None:
+                log.debug("Reusing existing session for %s", path)
+                return existing
+            task = self._opening.get(path)
+            if task is None:
+                task = asyncio.create_task(
+                    self._open_new_session(path),
+                    name=f"mcp-jupyter-open:{path}",
+                )
+                self._opening[path] = task
+        return await asyncio.shield(task)
 
     async def close(self, path: str) -> bool:
         """Close a notebook session and release its resources.
@@ -122,7 +113,17 @@ class SessionManager:
             ``True`` if the session existed and was closed, ``False`` if
             it was not open.
         """
-        session = self._sessions.pop(path, None)
+        path = self._session_key(path)
+        async with self._registry_lock:
+            opening = self._opening.get(path)
+        if opening is not None:
+            try:
+                await asyncio.shield(opening)
+            except Exception:
+                pass
+
+        async with self._registry_lock:
+            session = self._sessions.pop(path, None)
         if session is None:
             return False
 
@@ -133,12 +134,13 @@ class SessionManager:
             log.warning("Error stopping session for %s: %s", path, exc)
 
         # Update default if we just closed it
-        if self.default_path == path:
-            self.default_path = next(iter(self._sessions), None)
-            if self.default_path:
-                log.info("Default notebook changed to: %s", self.default_path)
-            else:
-                log.info("No notebooks remaining; default cleared")
+        async with self._registry_lock:
+            if self.default_path == path:
+                self.default_path = next(iter(self._sessions), None)
+                if self.default_path:
+                    log.info("Default notebook changed to: %s", self.default_path)
+                else:
+                    log.info("No notebooks remaining; default cleared")
 
         return True
 
@@ -164,6 +166,7 @@ class SessionManager:
             If the file exists but deletion fails.
         """
         # Close session first (idempotent — returns False if not open)
+        path = self._session_key(path)
         await self.close(path)
 
         if self._config["mode"] == "local":
@@ -173,7 +176,7 @@ class SessionManager:
 
     async def close_all(self) -> None:
         """Close every open session.  Used during server shutdown."""
-        paths = list(self._sessions.keys())
+        paths = list(dict.fromkeys([*self._sessions, *self._opening]))
         for p in paths:
             await self.close(p)
 
@@ -195,7 +198,7 @@ class SessionManager:
             If no path is given and no default is set, or if the
             requested notebook is not open.
         """
-        resolved = path or self.default_path
+        resolved = self._session_key(path) if path is not None else self.default_path
         if resolved is None:
             raise ValueError(
                 "No notebook_path specified and no default notebook is open. "
@@ -250,6 +253,46 @@ class SessionManager:
             return await self._list_server_files(directory, recursive)
 
     # ── private ─────────────────────────────────────
+
+    def _session_key(self, path: str) -> str:
+        """Return the canonical registry key used for a notebook path."""
+        if self._config["mode"] == "local":
+            return str(Path(path).expanduser().resolve())
+        return path.strip("/")
+
+    async def _open_new_session(self, path: str) -> NotebookSession:
+        """Build, start, and register one shared in-flight session."""
+        session: NotebookSession | None = None
+        try:
+            if self._config["mode"] == "local":
+                nb_path = Path(path)
+                if not nb_path.exists():
+                    log.info("Creating new notebook: %s", nb_path)
+                    nb_path.parent.mkdir(parents=True, exist_ok=True)
+                    import nbformat
+
+                    nbformat.write(nbformat.v4.new_notebook(), str(nb_path))
+
+            log.info("Opening notebook session: %s", path)
+            session = self._build_session(path)
+            await session.start()
+            async with self._registry_lock:
+                self._sessions[path] = session
+                if self.default_path is None:
+                    self.default_path = path
+                    log.info("Default notebook set to: %s", path)
+            return session
+        except BaseException:
+            if session is not None:
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+            raise
+        finally:
+            async with self._registry_lock:
+                if self._opening.get(path) is asyncio.current_task():
+                    self._opening.pop(path, None)
 
     def _list_local_files(self, directory: str, recursive: bool) -> list[dict[str, Any]]:
         """Scan the local filesystem for ``.ipynb`` files."""

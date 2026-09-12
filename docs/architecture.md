@@ -134,8 +134,9 @@ ensure type safety and IDE autocompletion.
 
 The toolkit uses callbacks at multiple levels:
 
-1. **Output streaming** — `output_callback` in `execute()` provides real-time
-   cell output updates
+1. **Output streaming** — `output_callback` in `execute()` receives ordered,
+   cumulative snapshots from a bounded dispatcher. Slow callbacks are
+   coalesced and callback failures are reported separately from execution.
 2. **Execution hooks** — `KernelHooks` singleton for pre/post execution
    instrumentation
 3. **Change observers** — `on_change()` on document transports for reactive
@@ -181,7 +182,7 @@ LocalTransport.execute(code)
     │   IOPub messages (stream, display_data, execute_result, error)
     │       │
     │       ▼
-    │   output_hook() — accumulates outputs, fires output_callback
+    │   output_hook() — updates state and signals callback dispatcher
     │
     ▼
 ExecutionResult (status, outputs, stdout, stderr)
@@ -215,7 +216,7 @@ ExecutionResult
 ```
 NotebookSession.append_and_run(code)
     │
-    ├─▶ doc.append_code_cell(code) → capture cell ID and source hash
+    ├─▶ doc.append_code_cell_with_id(code) → capture cell ID atomically
     │
     ├─▶ kernel.execute(code, output_callback=streaming_cb)
     │       │
@@ -223,7 +224,7 @@ NotebookSession.append_and_run(code)
     │   Incremental reducer snapshots:
     │       streaming_cb → doc.update_cell_outputs_by_id(id, outputs, count)
     │
-    ├─▶ Final: validate ID/source and persist normalized outputs
+    ├─▶ Final: validate ID/source and persist nbformat outputs
     │
     ▼
 (cell_index, ExecutionResult)
@@ -248,6 +249,7 @@ simple use cases:
 |---------|---------|
 | `pycrdt` | CRDT types (Doc, Array, Map, Text, Awareness) |
 | `jupyter_ydoc` | YNotebook — Yjs notebook model |
+| `packaging` | PEP 508 parsing and version/extras/marker checks |
 
 The collaboration client libraries are core because the package exposes the
 collaborative document transport directly. The server-side
@@ -277,16 +279,22 @@ These are detected at runtime and registered via `mimetypes.register_*_handlers(
 - Shared shell-channel consumers are serialized so replies cannot be stolen by
   another execution or introspection request. Interrupt and lifecycle control
   remain available through their own paths.
-- Serialize multi-step notebook workflows when sharing a `NotebookSession`
-  across tasks; the kernel request lock does not cover document edits before
-  and after each execution.
+- Control-channel requests use a separate lock. Remote WebSocket frames are
+  routed to per-request queues by parent message ID, so debugger control does
+  not compete with an active execution collector.
+- `NotebookSession` serializes multi-step append, source-update, execution, and
+  run-all workflows. Cell IDs are captured or resolved in the document mutation
+  that needs them.
 - `KernelManager` uses an internal `asyncio.Lock` for lifecycle operations
   (start, shutdown, restart, interrupt).
 - `LocalFileDocumentTransport` uses an `asyncio.Lock` for file I/O.
 - `CollabYjsDocumentTransport` uses an `asyncio.Lock` for cell mutations
   that involve multi-step CRDT operations.
-- Output callbacks are invoked sequentially in message order; they should
-  not block the event loop.
+- Output callbacks run sequentially in a separate dispatcher. It keeps the
+  newest pending snapshot, applies a configurable timeout, and records
+  coalescing or errors on `ExecutionResult`.
+- Collaboration output updates mutate existing CRDT fields, and broadcasts use
+  state-vector deltas whose baseline advances only after a successful send.
 
 ## Extension Points
 

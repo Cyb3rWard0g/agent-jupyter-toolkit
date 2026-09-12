@@ -40,6 +40,9 @@ def code_result(result: Any) -> dict[str, Any]:
         "kernel_generation": getattr(result, "kernel_generation", 0),
         "output_truncated": getattr(result, "output_truncated", False),
         "dropped_output_bytes": getattr(result, "dropped_output_bytes", 0),
+        "callback_snapshots_coalesced": getattr(result, "callback_snapshots_coalesced", 0),
+        "callback_status": getattr(result, "callback_status", "not-requested"),
+        "callback_error": getattr(result, "callback_error", None),
         "outcome": getattr(result, "outcome", "completed"),
         "timed_out": getattr(result, "timed_out", False),
     }

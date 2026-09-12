@@ -28,11 +28,13 @@ import uuid
 
 import aiohttp
 
+from ..callbacks import OutputCallbackDispatcher
 from ..execution_state import ExecutionState
 from ..history import decode_history_entries
 from ..hooks import kernel_hooks
 from ..messages import (
     build_complete_request,
+    build_control_request,
     build_execute_request,
     build_history_request,
     build_inspect_request,
@@ -50,6 +52,7 @@ from ..types import (
     KernelInfoResult,
     OutputCallback,
     ServerConfig,
+    UnsupportedKernelCapabilityError,
 )
 from ..websocket_codec import deserialize_binary_message, serialize_binary_message
 
@@ -108,9 +111,12 @@ class ServerTransport(KernelTransport):
         # Background pump maintains WebSocket connectivity
         self._pump_task: asyncio.Task | None = None
         self._inbox: asyncio.Queue = asyncio.Queue(maxsize=32)
+        self._request_queues: dict[str, asyncio.Queue] = {}
 
         # Execution lock prevents concurrent request interference
         self._exec_lock: asyncio.Lock = asyncio.Lock()
+        self._control_lock: asyncio.Lock = asyncio.Lock()
+        self._supported_features: set[str] | None = None
 
     @property
     def kernel_id(self) -> str | None:
@@ -272,6 +278,8 @@ class ServerTransport(KernelTransport):
         self._server_session_id = None
         self._owns_kernel = False
         self._owns_session = False
+        self._supported_features = None
+        self._request_queues.clear()
 
     @property
     def owns_kernel(self) -> bool:
@@ -324,6 +332,7 @@ class ServerTransport(KernelTransport):
         store_history: bool = True,
         user_expressions: dict | None = None,
         metadata: dict | None = None,
+        subshell_id: str | None = None,
         allow_stdin: bool = False,
         stop_on_error: bool = True,
     ) -> ExecutionResult:
@@ -367,6 +376,8 @@ class ServerTransport(KernelTransport):
             This method is thread-safe and uses an internal lock to prevent
             concurrent execution requests from interfering with each other.
         """
+        if subshell_id is not None:
+            await self._require_feature("kernel subshells")
         async with self._exec_lock:
             # Validate transport state
             if not (self._session and self._kernel_id):
@@ -378,11 +389,7 @@ class ServerTransport(KernelTransport):
                 await self.start()
 
             # Clear any stale messages from previous requests
-            try:
-                while True:
-                    self._inbox.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
+            self._drain_inbox()
 
             req = build_execute_request(
                 code,
@@ -392,12 +399,14 @@ class ServerTransport(KernelTransport):
                 allow_stdin=allow_stdin,
                 stop_on_error=stop_on_error,
                 metadata=metadata,
+                subshell_id=subshell_id,
             )
             req["channel"] = "shell"
             req.setdefault("buffers", [])
             req["header"]["session"] = self._client_session_id
             req["msg_type"] = req["header"].get("msg_type", "execute_request")
             request_id = req["header"]["msg_id"]
+            request_queue = self._register_request(request_id)
 
             preview = (code or "").splitlines()[0][:120]
             logger.info(
@@ -407,20 +416,38 @@ class ServerTransport(KernelTransport):
             # Trigger pre-execution hooks for instrumentation/logging
             kernel_hooks.trigger_before_execute_hooks(code)
 
-            await self._send_shell(req)
+            try:
+                await self._send_shell(req)
+            except BaseException:
+                self._unregister_request(request_id)
+                raise
+
+            state = ExecutionState(max_output_bytes=self.cfg.max_output_bytes)
+            callbacks = OutputCallbackDispatcher(
+                output_callback,
+                state.snapshot,
+                timeout=self.cfg.output_callback_timeout,
+            )
+
+            async def _finish_callbacks(result: ExecutionResult) -> None:
+                callback_error = await callbacks.finish()
+                callbacks.apply_to(result)
+                if callback_error is not None:
+                    kernel_hooks.trigger_on_error_hooks(callback_error)
 
             try:
-                state = ExecutionState(max_output_bytes=self.cfg.max_output_bytes)
-
-                async for msg in self._collect_for_request_stream(request_id, timeout=timeout):
+                async for msg in self._collect_for_request_stream(
+                    request_id,
+                    queue=request_queue,
+                    timeout=timeout,
+                ):
                     kernel_hooks.trigger_output_hooks(msg)
-                    if state.apply(msg) and output_callback:
-                        await output_callback(*state.snapshot())
+                    if state.apply(msg):
+                        callbacks.publish()
 
                 res = state.result()
                 res.request_id = request_id
-                if output_callback:
-                    await output_callback(*state.snapshot())
+                await _finish_callbacks(res)
 
                 # Trigger post-execution hooks for instrumentation/cleanup
                 kernel_hooks.trigger_after_execute_hooks(res)
@@ -435,12 +462,16 @@ class ServerTransport(KernelTransport):
                 )
                 return res
 
+            except asyncio.CancelledError:
+                await callbacks.cancel()
+                raise
             except KernelDisconnectedError as e:
-                if e.partial_result is None and "state" in locals():
+                if e.partial_result is None:
                     e.partial_result = state.result()
                     e.partial_result.request_id = request_id
                     e.partial_result.outcome = "unknown"
                     e.partial_result.status = "error"
+                await _finish_callbacks(e.partial_result)
                 kernel_hooks.trigger_on_error_hooks(e)
                 raise
             except TimeoutError as e:
@@ -450,13 +481,17 @@ class ServerTransport(KernelTransport):
                 res.outcome = "unknown"
                 res.timed_out = True
                 res.stderr += f"\nExecution timed out after {timeout}s."
+                await _finish_callbacks(res)
                 kernel_hooks.trigger_on_error_hooks(e)
                 return res
             except Exception as e:
+                await callbacks.finish()
                 # Trigger error hooks for consistent error handling
                 kernel_hooks.trigger_on_error_hooks(e)
                 logger.exception("execute(%s) failed: %s", request_id, e)
                 raise
+            finally:
+                self._unregister_request(request_id)
 
     # ── Introspection / control ──────────────────────────────────────────
 
@@ -483,6 +518,7 @@ class ServerTransport(KernelTransport):
             await self._shell_request_locked(
                 build_kernel_info_request(), timeout=self.cfg.startup_timeout
             )
+            self._supported_features = None
             logger.info("Kernel restarted and ready (kernel_id=%s)", self._kernel_id)
 
     async def interrupt(self) -> None:
@@ -566,7 +602,7 @@ class ServerTransport(KernelTransport):
         reply = await self._shell_request(build_kernel_info_request())
         content = reply.get("content", {})
         lang = content.get("language_info", {})
-        return KernelInfoResult(
+        result = KernelInfoResult(
             protocol_version=content.get("protocol_version", ""),
             implementation=content.get("implementation", ""),
             implementation_version=content.get("implementation_version", ""),
@@ -577,6 +613,70 @@ class ServerTransport(KernelTransport):
             supported_features=content.get("supported_features", []),
             raw_content=dict(content),
         )
+        self._supported_features = set(result.supported_features)
+        return result
+
+    async def debug(self, request: dict) -> dict:
+        """Send a DAP request over the control channel."""
+        if not isinstance(request, dict):
+            raise TypeError("debug request must be a dictionary")
+        await self._require_feature("debugger")
+        reply = await self._control_request(build_control_request("debug_request", request))
+        return dict(reply.get("content") or {})
+
+    async def create_subshell(self) -> str:
+        """Create an advertised kernel subshell."""
+        await self._require_feature("kernel subshells")
+        reply = await self._control_request(build_control_request("create_subshell_request"))
+        content = reply.get("content") or {}
+        self._raise_control_error(content, "create subshell")
+        subshell_id = content.get("subshell_id")
+        if not isinstance(subshell_id, str) or not subshell_id:
+            raise RuntimeError("Kernel returned no subshell id")
+        return subshell_id
+
+    async def delete_subshell(self, subshell_id: str) -> None:
+        """Delete an advertised kernel subshell."""
+        await self._require_feature("kernel subshells")
+        reply = await self._control_request(
+            build_control_request(
+                "delete_subshell_request",
+                {"subshell_id": subshell_id},
+            )
+        )
+        self._raise_control_error(reply.get("content") or {}, "delete subshell")
+
+    async def list_subshells(self) -> list[str]:
+        """List advertised kernel subshells."""
+        await self._require_feature("kernel subshells")
+        reply = await self._control_request(build_control_request("list_subshell_request"))
+        content = reply.get("content") or {}
+        self._raise_control_error(content, "list subshells")
+        ids = content.get("subshell_id", [])
+        if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
+            raise RuntimeError("Kernel returned invalid subshell ids")
+        return ids
+
+    async def _require_feature(self, feature: str) -> None:
+        if self._supported_features is None:
+            await self.kernel_info()
+        if feature not in (self._supported_features or set()):
+            raise UnsupportedKernelCapabilityError(
+                f"Kernel does not advertise the {feature!r} capability"
+            )
+
+    async def _control_request(self, req: dict) -> dict:
+        async with self._control_lock:
+            return await self._channel_request_locked(
+                req,
+                channel="control",
+                timeout=self.cfg.request_timeout,
+            )
+
+    @staticmethod
+    def _raise_control_error(content: dict, operation: str) -> None:
+        if content.get("status", "ok") != "ok":
+            raise RuntimeError(f"Could not {operation}: {content.get('evalue', 'kernel error')}")
 
     async def _shell_request(self, req: dict) -> dict:
         """
@@ -590,54 +690,69 @@ class ServerTransport(KernelTransport):
             return await self._shell_request_locked(req, timeout=self.cfg.request_timeout)
 
     async def _shell_request_locked(self, req: dict, *, timeout: float) -> dict:
+        return await self._channel_request_locked(req, channel="shell", timeout=timeout)
+
+    async def _channel_request_locked(
+        self,
+        req: dict,
+        *,
+        channel: str,
+        timeout: float,
+    ) -> dict:
         if not (self._session and self._kernel_id):
             raise RuntimeError("ServerTransport not started. Call start() first.")
         if self._ws is None or self._ws.closed:
             await self.start()
 
-        self._drain_inbox()
-
-        req["channel"] = "shell"
+        req["channel"] = channel
         req.setdefault("buffers", [])
         req["header"]["session"] = self._client_session_id
         req["msg_type"] = req["header"].get("msg_type", "unknown")
         request_id = req["header"]["msg_id"]
+        queue = self._register_request(request_id)
 
-        await self._send_shell(req)
+        try:
+            await self._send_shell(req)
+            deadline = asyncio.get_running_loop().time() + timeout
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError(f"Timeout waiting for reply to {req['msg_type']}")
+                try:
+                    raw = await asyncio.wait_for(queue.get(), min(remaining, 0.5))
+                except TimeoutError:
+                    continue
+                if raw.get("msg_type") == "__ws_closed__":
+                    raise KernelDisconnectedError(
+                        f"Kernel connection closed while waiting for {req['msg_type']}"
+                    )
+                msg = raw.get("msg") or raw
+                header = msg.get("header") or {}
+                parent = msg.get("parent_header") or {}
+                msg_type = header.get("msg_type", "")
+                parent_id = parent.get("msg_id")
 
-        deadline = asyncio.get_running_loop().time() + timeout
-        while True:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError(f"Timeout waiting for reply to {req['msg_type']}")
-            try:
-                raw = await asyncio.wait_for(self._inbox.get(), min(remaining, 0.5))
-            except TimeoutError:
-                continue
-            if raw.get("msg_type") == "__ws_closed__":
-                raise KernelDisconnectedError(
-                    f"Kernel connection closed while waiting for {req['msg_type']}"
-                )
-            msg = raw.get("msg") or raw
-            header = msg.get("header") or {}
-            parent = msg.get("parent_header") or {}
-            msg_type = header.get("msg_type", "")
-            parent_id = parent.get("msg_id")
+                if parent_id == request_id and msg_type.endswith("_reply"):
+                    return msg
+        finally:
+            self._unregister_request(request_id)
 
-            if parent_id == request_id and msg_type.endswith("_reply"):
-                return msg
-
-    async def _collect_for_request_stream(self, request_id: str, *, timeout: float | None):
+    async def _collect_for_request_stream(
+        self,
+        request_id: str,
+        *,
+        queue: asyncio.Queue,
+        timeout: float | None,
+    ):
         """
         Yield each kernel event for this request as it arrives (streaming).
         We only consider DONE after seeing BOTH:
         - iopub status: idle        with parent_header.msg_id == request_id
         - shell execute_reply       with parent_header.msg_id == request_id
 
-        Frames without a parent_id are yielded (so they can be folded into outputs),
-        but they DO NOT advance the done-condition.
+        The WebSocket pump routes only frames with this request's parent ID to
+        ``queue``; unmatched broadcasts remain in the transport inbox.
         """
-        queue = self._inbox
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else (loop.time() + timeout)
 
@@ -693,81 +808,6 @@ class ServerTransport(KernelTransport):
 
             if seen_idle_for_req and seen_reply_for_req:
                 break
-
-    async def _collect_for_request(self, request_id: str, *, timeout: float | None) -> list[dict]:
-        """
-        Batch collector (non-streaming) retained for completeness and debugging.
-        Returns a list of events after both idle and execute_reply (or timeout).
-        """
-        loop = asyncio.get_running_loop()
-        deadline = None if timeout is None else (loop.time() + timeout)
-
-        events: list[dict] = []
-        got_idle = False
-        got_reply = False
-        n = 0
-
-        while True:
-            timeout_remaining = None if deadline is None else max(0.0, deadline - loop.time())
-            try:
-                frame = await asyncio.wait_for(self._inbox.get(), timeout_remaining)
-            except TimeoutError:
-                logger.warning("collect_for_request(%s) timeout after %ss", request_id, timeout)
-                events.append(
-                    {
-                        "msg_type": "error",
-                        "content": {"ename": "TimeoutError", "evalue": "", "traceback": []},
-                    }
-                )
-                break
-
-            if frame.get("msg_type") == "__ws_closed__":
-                logger.warning("collect_for_request(%s): WS closed", request_id)
-                break
-
-            inner = frame.get("msg") or frame
-            channel = inner.get("channel") or frame.get("channel")
-            header = inner.get("header") or frame.get("header") or {}
-            parent = inner.get("parent_header") or frame.get("parent_header") or {}
-            msg_type = inner.get("msg_type") or header.get("msg_type")
-            content = inner.get("content") or frame.get("content") or {}
-            parent_id = parent.get("msg_id")
-
-            if ws_logger.isEnabledFor(logging.DEBUG):
-                ws_logger.debug("chan=%r type=%r parent_id=%r", channel, msg_type, parent_id)
-
-            if parent_id is not None and parent_id != request_id:
-                continue
-
-            if msg_type in (
-                "stream",
-                "display_data",
-                "update_display_data",
-                "execute_result",
-                "error",
-                "execute_input",
-                "execute_reply",
-                "status",
-            ):
-                events.append({"msg_type": msg_type, "content": content})
-                n += 1
-
-                if (
-                    channel == "iopub"
-                    and msg_type == "status"
-                    and content.get("execution_state") == "idle"
-                ):
-                    got_idle = True
-                if channel == "shell" and msg_type == "execute_reply":
-                    got_reply = True
-
-                if got_idle and got_reply:
-                    logger.debug(
-                        "collect_for_request(%s) done: events=%d (idle & reply seen)", request_id, n
-                    )
-                    break
-
-        return events
 
     def _auth_headers(self) -> dict[str, str]:
         """
@@ -859,7 +899,7 @@ class ServerTransport(KernelTransport):
         return data["id"]
 
     async def _send_shell(self, msg: dict) -> None:
-        """Send message to kernel's shell channel via WebSocket."""
+        """Send a shell or control message through the kernel WebSocket."""
         assert self._ws is not None
         try:
             if msg.get("buffers"):
@@ -894,13 +934,13 @@ class ServerTransport(KernelTransport):
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
                         # Kernel channels send canonical Jupyter messages (JSON)
-                        await self._inbox.put(msg.json())
+                        await self._dispatch_frame(msg.json())
                     except Exception:
                         # If parsing fails, skip this frame
                         continue
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     try:
-                        await self._inbox.put(deserialize_binary_message(msg.data))
+                        await self._dispatch_frame(deserialize_binary_message(msg.data))
                     except Exception as exc:
                         ws_logger.warning("Invalid binary kernel frame: %s", exc)
                 elif msg.type in (aiohttp.WSMsgType.PING, aiohttp.WSMsgType.PONG):
@@ -914,12 +954,40 @@ class ServerTransport(KernelTransport):
                     break
         finally:
             # Notify collectors that WS closed so they can bail quickly
-            try:
-                if self._inbox.full():
-                    self._inbox.get_nowait()
-                self._inbox.put_nowait({"msg_type": "__ws_closed__", "content": {}})
-            except Exception:
-                pass
+            closed = {"msg_type": "__ws_closed__", "content": {}}
+            for queue in [self._inbox, *list(self._request_queues.values())]:
+                try:
+                    if queue.full():
+                        queue.get_nowait()
+                    queue.put_nowait(closed)
+                except Exception:
+                    pass
+
+    async def _dispatch_frame(self, frame: dict) -> None:
+        """Route one kernel frame to its request without competing consumers."""
+        inner = frame.get("msg") or frame
+        parent = inner.get("parent_header") or frame.get("parent_header") or {}
+        queue = self._request_queues.get(parent.get("msg_id"))
+        if queue is None:
+            if self._inbox.full():
+                self._inbox.get_nowait()
+            self._inbox.put_nowait(frame)
+            return
+        await queue.put(frame)
+
+    def _register_request(self, request_id: str) -> asyncio.Queue:
+        """Create the dedicated queue used by one in-flight request."""
+        if request_id in self._request_queues:
+            raise RuntimeError(f"Duplicate kernel request id: {request_id}")
+        queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+        self._request_queues[request_id] = queue
+        return queue
+
+    def _unregister_request(self, request_id: str) -> None:
+        """Stop routing frames for a settled request."""
+        queue = self._request_queues.pop(request_id, None)
+        if queue is not None and queue.full():
+            queue.get_nowait()
 
     def _drain_inbox(self) -> None:
         try:

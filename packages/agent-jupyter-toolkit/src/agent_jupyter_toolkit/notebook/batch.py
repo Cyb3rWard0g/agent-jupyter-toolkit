@@ -7,6 +7,8 @@ from typing import Any
 
 import nbformat
 
+from .utils import validate_notebook
+
 
 async def execute_notebook_batch(
     notebook: dict[str, Any],
@@ -28,7 +30,7 @@ async def execute_notebook_batch(
         ) from exc
 
     node = nbformat.from_dict(json.loads(json.dumps(notebook)))
-    nbformat.validate(node)
+    validate_notebook(node)
     options = {
         "kernel_name": kernel_name,
         "timeout": timeout,
@@ -38,5 +40,5 @@ async def execute_notebook_batch(
         options["resources"] = {"metadata": {"path": cwd}}
     client = NotebookClient(node, **options)
     executed = await client.async_execute()
-    nbformat.validate(executed)
+    validate_notebook(executed)
     return json.loads(nbformat.writes(executed, version=4, split_lines=False))

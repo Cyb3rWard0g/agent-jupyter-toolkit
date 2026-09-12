@@ -230,11 +230,16 @@ Manage pip packages in the kernel environment:
 ```python
 from agent_jupyter_toolkit.utils import check_package_availability
 
-status = await check_package_availability(kernel, ["pandas", "numpy", "plotly"])
-# → {"pandas": True, "numpy": True, "plotly": False}
+status = await check_package_availability(
+    kernel,
+    ["pandas>=2", "numpy; python_version >= '3.11'", "plotly[express]"],
+)
 ```
 
-Uses `importlib.metadata` for accurate distribution-level checks.
+Inputs are parsed as PEP 508 requirements before any kernel code runs. Checks
+use the distribution installed in the kernel and honor version specifiers,
+environment markers, requested extras, and the dependencies activated by those
+extras. Invalid requirements raise `ValueError`.
 
 ### `ensure_packages()`
 
@@ -295,6 +300,11 @@ details, the kernel interpreter, and the selected installer. uv receives that
 kernel's `sys.executable` through `--python`; the pip fallback uses the same
 interpreter. A remote kernel is never labeled with or modified through the
 agent process's interpreter.
+
+`NotebookSession.install_packages()` stores dependencies under their canonical
+distribution name and records both the requested requirement and resolved
+version. Uninstall accepts a full requirement but passes only its parsed
+distribution name to pip/uv and removes matching tracked entries.
 
 ### Pre-defined package groups
 

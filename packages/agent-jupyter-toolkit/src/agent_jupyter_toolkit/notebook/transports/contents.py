@@ -22,7 +22,7 @@ import nbformat
 
 from ..transport import NotebookDocumentTransport
 from ..types import CellDeletedError, CellSourceChangedError
-from ..utils import create_notebook_via_contents_api
+from ..utils import create_notebook_via_contents_api, validate_notebook
 
 log = logging.getLogger(__name__)
 
@@ -246,7 +246,7 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
     async def _save(self, content: dict[str, Any], *, expected_revision: str | None) -> None:
         assert self._session is not None, "Call start() first"
         candidate = nbformat.from_dict(content)
-        nbformat.validate(candidate)
+        validate_notebook(candidate)
         content = json.loads(nbformat.writes(candidate, version=4))
         await self._check_stale(expected_revision=expected_revision)
         url = f"{self._base}/api/contents/{quote(self._path)}"
@@ -297,10 +297,21 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
         tags: list[str] | None = None,
     ) -> int:
         """Append a code cell and return its new index."""
+        index, _ = await self.append_code_cell_with_id(source, metadata=metadata, tags=tags)
+        return index
+
+    async def append_code_cell_with_id(
+        self,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> tuple[int, str]:
+        """Append a code cell and return its index and ID in one mutation."""
+        cell_id = uuid.uuid4().hex
 
         def m(cells):
             cell = {
-                "id": uuid.uuid4().hex,
+                "id": cell_id,
                 "cell_type": "code",
                 "metadata": dict(metadata or {}),
                 "source": source,
@@ -314,7 +325,8 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
             cells.append(cell)
             return len(cells) - 1
 
-        return await self._mutate_cells(m, kind="append_code")
+        index = await self._mutate_cells(m, kind="append_code", event={"cell_id": cell_id})
+        return index, cell_id
 
     async def insert_code_cell(
         self,
@@ -456,6 +468,31 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
             return index
 
         await self._mutate_cells(m, kind="set_source")
+
+    async def set_cell_source_by_id(
+        self,
+        cell_id: str,
+        source: str,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Resolve, verify, and update a cell in one Contents mutation."""
+
+        def mutate(cells):
+            for index, cell in enumerate(cells):
+                if cell.get("id") != cell_id:
+                    continue
+                if expected_source is not None and cell.get("source") != expected_source:
+                    raise CellSourceChangedError(f"Cell {cell_id!r} source changed before update")
+                cell["source"] = source
+                return index
+            raise CellDeletedError(f"Cell {cell_id!r} was deleted")
+
+        return await self._mutate_cells(
+            mutate,
+            kind="set_source",
+            event={"cell_id": cell_id},
+        )
 
     async def delete_cell(self, index: int) -> None:
         """Delete the cell at `index`."""

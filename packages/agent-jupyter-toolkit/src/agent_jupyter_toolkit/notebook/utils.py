@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -275,10 +276,41 @@ def validate_notebook(nb: nbformat.NotebookNode) -> None:
         ```
     """
     try:
-        nbformat.validate(nb)
+        candidate = deepcopy(nb)
+        seen_ids: set[str] = set()
+        for cell in candidate.get("cells", []):
+            cell_id = cell.get("id")
+            if isinstance(cell_id, str):
+                if cell_id in seen_ids:
+                    raise ValueError(f"Duplicate notebook cell id: {cell_id!r}")
+                seen_ids.add(cell_id)
+        from nbformat.validator import iter_validate
+
+        error = next(iter_validate(candidate), None)
+        if error is not None:
+            raise error
     except Exception as e:
         logger.error("Notebook validation failed: %s", e)
         raise
+
+
+def normalize_notebook(
+    nb: nbformat.NotebookNode,
+    *,
+    strip_invalid_metadata: bool = False,
+) -> tuple[int, nbformat.NotebookNode]:
+    """Return an explicitly normalized copy and its number of repairs.
+
+    Validation never calls this function implicitly, so callers can inspect
+    and approve generated IDs or stripped metadata before saving the result.
+    """
+    from nbformat.validator import normalize
+
+    changes, normalized = normalize(
+        nb,
+        strip_invalid_metadata=strip_invalid_metadata,
+    )
+    return changes, nbformat.from_dict(normalized)
 
 
 def atomic_write_notebook(nb: nbformat.NotebookNode, path: Path) -> None:
@@ -300,7 +332,7 @@ def atomic_write_notebook(nb: nbformat.NotebookNode, path: Path) -> None:
     target = ensure_allowed_for_write(path)
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
-        nbformat.write(nb, tmp)
+        nbformat.write(deepcopy(nb), tmp)
         tmp.replace(target)
         logger.info("Notebook written atomically to %s", target)
     except Exception as e:

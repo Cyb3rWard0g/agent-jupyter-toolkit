@@ -17,13 +17,13 @@ Key features:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 from collections.abc import Callable
 from typing import Any
 
 from jupyter_core.paths import jupyter_runtime_dir
 
+from ..callbacks import OutputCallbackDispatcher
 from ..execution_state import ExecutionState
 from ..history import decode_history_entries
 from ..hooks import kernel_hooks
@@ -36,6 +36,7 @@ from ..types import (
     InspectResult,
     IsCompleteResult,
     KernelInfoResult,
+    UnsupportedKernelCapabilityError,
 )
 
 
@@ -69,6 +70,7 @@ class LocalTransport(KernelTransport):
         env: dict[str, str] | None = None,
         kernel_args: list[str] | None = None,
         max_output_bytes: int | None = 50 * 1024 * 1024,
+        output_callback_timeout: float | None = 30.0,
         transport_encryption: str = "disabled",
         manager_factory: Callable[..., KernelManager] | None = None,
     ) -> None:
@@ -108,7 +110,10 @@ class LocalTransport(KernelTransport):
             transport_encryption=transport_encryption,
         )
         self._request_lock = asyncio.Lock()
+        self._control_lock = asyncio.Lock()
         self._max_output_bytes = max_output_bytes
+        self._output_callback_timeout = output_callback_timeout
+        self._supported_features: set[str] | None = None
 
     @property
     def kernel_manager(self) -> KernelManager:
@@ -174,6 +179,7 @@ class LocalTransport(KernelTransport):
             await self._km.start()
 
         # Kernel is ready for direct execution
+        self._supported_features = None
 
     async def shutdown(self) -> None:
         """Close channels and terminate only a kernel created by this client."""
@@ -208,10 +214,13 @@ class LocalTransport(KernelTransport):
         store_history: bool = True,
         user_expressions: dict | None = None,
         metadata: dict | None = None,
+        subshell_id: str | None = None,
         allow_stdin: bool = False,
         stop_on_error: bool = True,
     ) -> ExecutionResult:
         """Execute while ensuring one upstream helper owns the client channels."""
+        if subshell_id is not None:
+            await self._require_feature("kernel subshells")
         async with self._request_lock:
             return await self._execute_locked(
                 code,
@@ -221,6 +230,7 @@ class LocalTransport(KernelTransport):
                 store_history=store_history,
                 user_expressions=user_expressions,
                 metadata=metadata,
+                subshell_id=subshell_id,
                 allow_stdin=allow_stdin,
                 stop_on_error=stop_on_error,
             )
@@ -235,6 +245,7 @@ class LocalTransport(KernelTransport):
         store_history: bool = True,
         user_expressions: dict | None = None,
         metadata: dict | None = None,
+        subshell_id: str | None = None,
         allow_stdin: bool = False,
         stop_on_error: bool = True,
     ) -> ExecutionResult:
@@ -287,48 +298,23 @@ class LocalTransport(KernelTransport):
         # Trigger pre-execution hooks for instrumentation/logging
         kernel_hooks.trigger_before_execute_hooks(code)
 
-        callback_queue: asyncio.Queue[tuple[list[dict[str, Any]], int | None] | None] | None
-        callback_queue = asyncio.Queue(maxsize=1) if output_callback else None
-        callback_error: BaseException | None = None
-        callback_snapshots_coalesced = 0
-
-        async def _consume_callbacks() -> None:
-            nonlocal callback_error
-            assert callback_queue is not None
-            while True:
-                snapshot = await callback_queue.get()
-                if snapshot is None:
-                    return
-                if callback_error is None:
-                    try:
-                        await output_callback(*snapshot)
-                    except Exception as exc:
-                        callback_error = exc
-
-        callback_task = (
-            asyncio.create_task(_consume_callbacks(), name="ajt-output-callback")
-            if callback_queue is not None
-            else None
+        callbacks = OutputCallbackDispatcher(
+            output_callback,
+            state.snapshot,
+            timeout=self._output_callback_timeout,
         )
-
-        def _enqueue_callback() -> None:
-            nonlocal callback_snapshots_coalesced
-            if callback_queue is not None:
-                if callback_queue.full():
-                    callback_queue.get_nowait()
-                    callback_snapshots_coalesced += 1
-                callback_queue.put_nowait(state.snapshot())
+        completed_request = False
 
         # Custom output hook to capture outputs for our result object
         def output_hook(msg: dict[str, Any]) -> None:
             """Capture IOPub messages and fold them into our ExecutionResult."""
             kernel_hooks.trigger_output_hooks(msg)
             if state.apply(msg):
-                _enqueue_callback()
+                callbacks.publish()
 
         try:
             original_execute = kc.execute
-            if metadata:
+            if metadata or subshell_id is not None:
 
                 def _execute_with_metadata(
                     source,
@@ -347,6 +333,8 @@ class LocalTransport(KernelTransport):
                         "stop_on_error": stop_on_error,
                     }
                     message = kc.session.msg("execute_request", content=content, metadata=metadata)
+                    if subshell_id is not None:
+                        message["header"]["subshell_id"] = subshell_id
                     kc.shell_channel.send(message)
                     return message["header"]["msg_id"]
 
@@ -363,18 +351,15 @@ class LocalTransport(KernelTransport):
                     output_hook=output_hook,
                 )
             finally:
-                if metadata:
+                if metadata or subshell_id is not None:
                     kc.execute = original_execute
             state.apply({"msg_type": "execute_reply", "content": reply.get("content", {})})
             res = state.result()
             res.request_id = (reply.get("parent_header") or {}).get("msg_id")
-            kernel_hooks.trigger_after_execute_hooks(res)
+            completed_request = True
 
         except asyncio.CancelledError:
-            if callback_task is not None:
-                callback_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await callback_task
+            await callbacks.cancel()
             raise
 
         except TimeoutError as te:
@@ -392,24 +377,13 @@ class LocalTransport(KernelTransport):
             res.stderr += f"\n{type(e).__name__}: {e}"
             kernel_hooks.trigger_on_error_hooks(e)
         finally:
-            if (
-                callback_queue is not None
-                and callback_task is not None
-                and not callback_task.done()
-            ):
-                _enqueue_callback()
-                await callback_queue.put(None)
-            if callback_task is not None and not callback_task.cancelled():
-                await callback_task
+            callback_error = await callbacks.finish()
 
         if callback_error is not None:
-            if isinstance(callback_error, asyncio.CancelledError):
-                raise callback_error
-            res.status = "error"
-            res.stderr += f"\n{type(callback_error).__name__}: {callback_error}"
             kernel_hooks.trigger_on_error_hooks(callback_error)
-
-        res.callback_snapshots_coalesced = callback_snapshots_coalesced
+        callbacks.apply_to(res)
+        if completed_request:
+            kernel_hooks.trigger_after_execute_hooks(res)
 
         return res
 
@@ -427,6 +401,7 @@ class LocalTransport(KernelTransport):
         """
         async with self._request_lock:
             await self._km.restart()
+            self._supported_features = None
 
     async def interrupt(self) -> None:
         """Interrupt the running kernel via the KernelManager."""
@@ -504,7 +479,7 @@ class LocalTransport(KernelTransport):
         reply = await self._client_reply("kernel_info")
         content = reply.get("content", {})
         lang = content.get("language_info", {})
-        return KernelInfoResult(
+        result = KernelInfoResult(
             protocol_version=content.get("protocol_version", ""),
             implementation=content.get("implementation", ""),
             implementation_version=content.get("implementation_version", ""),
@@ -515,6 +490,77 @@ class LocalTransport(KernelTransport):
             supported_features=content.get("supported_features", []),
             raw_content=dict(content),
         )
+        self._supported_features = set(result.supported_features)
+        return result
+
+    async def debug(self, request: dict) -> dict:
+        """Send a DAP request over the control channel."""
+        if not isinstance(request, dict):
+            raise TypeError("debug request must be a dictionary")
+        await self._require_feature("debugger")
+        reply = await self._control_reply("debug_request", request)
+        return dict(reply.get("content") or {})
+
+    async def create_subshell(self) -> str:
+        """Create an advertised kernel subshell."""
+        await self._require_feature("kernel subshells")
+        content = (await self._control_reply("create_subshell_request")).get("content") or {}
+        self._raise_control_error(content, "create subshell")
+        subshell_id = content.get("subshell_id")
+        if not isinstance(subshell_id, str) or not subshell_id:
+            raise RuntimeError("Kernel returned no subshell id")
+        return subshell_id
+
+    async def delete_subshell(self, subshell_id: str) -> None:
+        """Delete an advertised kernel subshell."""
+        await self._require_feature("kernel subshells")
+        content = (
+            await self._control_reply(
+                "delete_subshell_request",
+                {"subshell_id": subshell_id},
+            )
+        ).get("content") or {}
+        self._raise_control_error(content, "delete subshell")
+
+    async def list_subshells(self) -> list[str]:
+        """List advertised kernel subshells."""
+        await self._require_feature("kernel subshells")
+        content = (await self._control_reply("list_subshell_request")).get("content") or {}
+        self._raise_control_error(content, "list subshells")
+        ids = content.get("subshell_id", [])
+        if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
+            raise RuntimeError("Kernel returned invalid subshell ids")
+        return ids
+
+    async def _require_feature(self, feature: str) -> None:
+        if self._supported_features is None:
+            await self.kernel_info()
+        if feature not in (self._supported_features or set()):
+            raise UnsupportedKernelCapabilityError(
+                f"Kernel does not advertise the {feature!r} capability"
+            )
+
+    async def _control_reply(
+        self,
+        msg_type: str,
+        content: dict | None = None,
+    ) -> dict[str, Any]:
+        async with self._control_lock:
+            if not self._km or not self._km.client:
+                raise RuntimeError("LocalTransport not started. Call start() first.")
+            client = self._km.client
+            message = client.session.msg(msg_type, content=content or {})
+            client.control_channel.send(message)
+            return await client._recv_reply(
+                message["header"]["msg_id"],
+                timeout=10,
+                channel="control",
+            )
+
+    @staticmethod
+    def _raise_control_error(content: dict, operation: str) -> None:
+        if content.get("status", "ok") != "ok":
+            raise RuntimeError(f"Could not {operation}: {content.get('evalue', 'kernel error')}")
 
     async def _client_reply(self, method: str, *args, **kwargs) -> dict[str, Any]:
         """Call one reply-consuming jupyter_client helper under the request guard."""

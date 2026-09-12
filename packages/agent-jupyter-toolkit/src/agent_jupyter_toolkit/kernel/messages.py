@@ -23,6 +23,7 @@ def build_execute_request(
     user_expressions: dict | None = None,
     allow_stdin: bool = False,
     metadata: dict[str, Any] | None = None,
+    subshell_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Construct a minimal Jupyter 'execute_request' payload suitable for either
@@ -54,7 +55,7 @@ def build_execute_request(
     dict
         A complete message envelope ready to be sent over a kernel channel.
     """
-    return {
+    message = {
         "header": _mk_header("execute_request"),
         "parent_header": {},
         "metadata": dict(metadata or {}),
@@ -68,6 +69,28 @@ def build_execute_request(
         },
         "channel": "shell",
         "buffers": [],  # keep the envelope consistent
+    }
+    if subshell_id is not None:
+        message["header"]["subshell_id"] = subshell_id
+    return message
+
+
+def build_control_request(msg_type: str, content: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Construct a control-channel request for optional kernel features."""
+    if msg_type not in {
+        "debug_request",
+        "create_subshell_request",
+        "delete_subshell_request",
+        "list_subshell_request",
+    }:
+        raise ValueError(f"Unsupported control request type: {msg_type}")
+    return {
+        "header": _mk_header(msg_type),
+        "parent_header": {},
+        "metadata": {},
+        "content": dict(content or {}),
+        "channel": "control",
+        "buffers": [],
     }
 
 

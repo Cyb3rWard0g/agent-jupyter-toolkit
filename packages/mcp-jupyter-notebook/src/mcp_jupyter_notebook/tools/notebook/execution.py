@@ -87,10 +87,16 @@ def register_execution_tools(
         ctx: Context,
         notebook_path: str | None = None,
         timeout: float = 120.0,
+        subshell_id: str | None = None,
     ) -> dict[str, Any]:
         """Execute code directly in the kernel without creating a notebook cell."""
         session = get_session(ctx, notebook_path)
-        result = await execute_code_fn(session.kernel, code, timeout=timeout)
+        result = await execute_code_fn(
+            session.kernel,
+            code,
+            timeout=timeout,
+            subshell_id=subshell_id,
+        )
         return {
             "ok": result.status == "ok",
             "status": result.status,
@@ -107,6 +113,9 @@ def register_execution_tools(
             "kernel_generation": result.kernel_generation,
             "output_truncated": result.output_truncated,
             "dropped_output_bytes": result.dropped_output_bytes,
+            "callback_snapshots_coalesced": result.callback_snapshots_coalesced,
+            "callback_status": result.callback_status,
+            "callback_error": result.callback_error,
             "outcome": result.outcome,
             "timed_out": result.timed_out,
         }

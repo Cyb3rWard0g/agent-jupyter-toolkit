@@ -20,11 +20,13 @@ await transport.is_connected()
 await transport.fetch()              # → nbformat dict
 await transport.save(content)
 await transport.append_code_cell(source, metadata=None, tags=None)
+await transport.append_code_cell_with_id(source, metadata=None, tags=None)
 await transport.insert_code_cell(index, source, metadata=None, tags=None)
 await transport.append_markdown_cell(source, tags=None)
 await transport.insert_markdown_cell(index, source, tags=None)
 await transport.update_cell_outputs(index, outputs, execution_count)
 await transport.set_cell_source(index, source)
+await transport.set_cell_source_by_id(cell_id, source, expected_source=None)
 await transport.get_cell(index)
 await transport.cell_count()
 await transport.get_cell_source(index)
@@ -62,6 +64,7 @@ Features:
 - Atomic saves (write to temp file, then rename)
 - Full nbformat validation before replacing the file
 - Stable cell-ID and expected-source checks for output persistence
+- Atomic append/source-by-ID mutations for execution workflows
 - Optional **debounced autosave** — batches rapid edits into a single write
 - Path security via configurable allowlist (see [Configuration](configuration.md))
 
@@ -105,6 +108,7 @@ Features:
 - Token and cookie-based authentication
 - Automatic notebook creation via PUT when `create_if_missing=True`
 - Candidate validation before PUT and snapshot-bound freshness checks for `NotebookBuffer`
+- Stable cell IDs captured in the serialized append mutation
 
 Contents freshness checks use a GET followed by a PUT, so they cannot provide an
 atomic compare-and-swap against another writer. Use collaboration mode for
@@ -134,9 +138,15 @@ Features:
 - Real-time document sync via Yjs/CRDT (pycrdt)
 - Conflict-free concurrent editing from multiple clients
 - Cell mutations applied as CRDT operations (merge, don't overwrite)
+- Output updates mutate the shared cell's output array and execution count in
+  place, preserving concurrent source and metadata edits
+- State-vector deltas whose baseline advances only after a successful send;
+  failed WebSocket sends remain retryable and propagate to the caller
 - **Awareness protocol** — broadcast presence metadata (cursors, user info)
 - Automatic reconnection and state recovery
-- **Default empty cell stripping** — JupyterLab adds a blank code cell to every new notebook; the transport removes it on `start()` so the notebook begins truly empty
+- **Default empty cell stripping** — only a notebook created by this client has
+  its untouched, metadata-free placeholder removed; meaningful blank cells are
+  preserved
 - Required/preferred/disabled selection with classified preferred-mode fallback
 
 `collaboration_mode="required"` propagates every collaboration startup error.
@@ -247,6 +257,13 @@ async with NotebookSession(kernel=kernel, doc=doc) as nb:
 | `restart_and_run_all(stop_on_error=True, timeout=None)` | `RunAllResult` | Restart kernel, then run all code cells from a clean state |
 | `is_connected()` | `bool` | Both kernel and document are live |
 
+Append, existing-cell execution, markdown insertion, run-all, and
+restart-and-run-all are serialized per `NotebookSession`. An appended cell's ID
+is captured in the append mutation, and existing-cell source replacement
+resolves and checks the original ID in the write mutation. Output delivery
+therefore stays attached to the intended cell when another client inserts or
+moves cells.
+
 ### Streaming behavior
 
 During execution, outputs are streamed to the document cell in real time:
@@ -263,10 +280,34 @@ contains `persistence_status="error"` and the conflict; output is never redirect
 to the cell that later occupies the same numeric index. Cross-cell display update
 failures are reported through the same persistence fields.
 
+A failed collaboration send uses the same result contract: kernel execution may
+still have `status="ok"` while `persistence_status="error"` identifies the
+delivery failure.
+
 Display handles can target several cells. Rerunning a target cell, replacing its
 outputs, or restarting the kernel invalidates its old display registrations.
 Run-all results retain each cell's persistence and timeout details; the aggregate
 status is an error if either execution or persistence fails.
+
+## Validation and normalization
+
+Transport saves validate a deep copy and never repair the caller's notebook as
+a side effect. Duplicate cell IDs and other schema violations fail before a
+local atomic replace or Contents API PUT.
+
+Repairs are explicit:
+
+```python
+from agent_jupyter_toolkit.notebook.utils import normalize_notebook, validate_notebook
+
+validate_notebook(notebook)  # raises; does not mutate notebook
+changes, repaired = normalize_notebook(notebook)
+if changes:
+    await transport.save(repaired)
+```
+
+This makes generated cell IDs and stripped invalid metadata visible before
+data is written.
 
 ## NotebookBuffer
 

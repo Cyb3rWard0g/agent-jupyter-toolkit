@@ -165,9 +165,8 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         self._awareness_observer = None
         self._awareness_ping: asyncio.Task | None = None
 
-        # Transaction completion tracking
-        self._pending_updates: dict[int, asyncio.Future] = {}
-        self._update_counter = 0
+        # State vector used to send only changes since the previous successful send.
+        self._last_broadcast_state: bytes | None = None
 
         # Yjs sync barriers
         self._initial_sync_done: asyncio.Event = asyncio.Event()
@@ -211,6 +210,7 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
             self._http = aiohttp.ClientSession(headers=self._http_headers)
 
         # Ensure notebook exists
+        created = False
         if self._create_if_missing:
             wslog.info("Ensuring notebook exists before collaboration: %s", self._path)
             try:
@@ -237,8 +237,6 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
             self._start_awareness_ping()
 
         # Session (creates if missing)
-        if self._create_if_missing:
-            await asyncio.sleep(5)
         # Session creation request
         url = f"{self._base}/api/collaboration/session/{quote(self._path)}"
         async with self._http.put(url, json={"format": "json", "type": "notebook"}) as r:
@@ -302,12 +300,17 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
 
         self._log_cells_snapshot("post-barrier (before _ensure_root)")
 
+        # Capture the synchronized state before local schema initialization.
+        # Any structures YNotebook creates must remain part of the next delta.
+        self._last_broadcast_state = self._doc.get_state()
+
         # Initialize YNotebook
         if self._ynb is None:
             self._ynb = YNotebook(ydoc=self._doc, awareness=self._awareness)
 
         # Ensure root schema
         await self._ensure_root()
+        await self._broadcast_update()
         self._log_cells_snapshot("post-ensure-root")
 
         # Fast-path: the initial sync may have delivered cells before _ynb
@@ -342,7 +345,8 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         # YNotebook._set() always injects one blank code cell when the
         # notebook file has an empty cells array; leaving it around shifts
         # every index by 1 and confuses downstream tools.
-        await self._strip_default_empty_cell()
+        if created:
+            await self._strip_default_empty_cell()
 
     async def _strip_default_empty_cell(self) -> None:
         """Strip the server-injected default empty code cell.
@@ -358,6 +362,7 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         if doc is None or self._ynb is None:
             return
 
+        removed = False
         for attempt in range(2):
             try:
                 with doc.transaction():
@@ -369,8 +374,19 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                         ycell = cells[0]
                         cell_type = ycell.get("cell_type")
                         src = ytext_to_str(ycell.get("source"))
-                        if cell_type == "code" and src.strip() == "":
+                        metadata = ycell.get("metadata")
+                        metadata = metadata.to_py() if hasattr(metadata, "to_py") else metadata
+                        outputs = ycell.get("outputs")
+                        is_unmodified_placeholder = (
+                            cell_type == "code"
+                            and src.strip() == ""
+                            and not metadata
+                            and (not isinstance(outputs, pycrdt.Array) or len(outputs) == 0)
+                            and ycell.get("execution_count") is None
+                        )
+                        if is_unmodified_placeholder:
                             del cells[0]
+                            removed = True
                             wslog.debug(
                                 "Stripped server's default empty code cell "
                                 "(attempt %d); notebook now has %d cells",
@@ -389,15 +405,10 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
             if attempt == 0:
                 await asyncio.sleep(self._cells_bootstrap_timeout)
 
-        # Broadcast the deletion so the server persists it
-        try:
-            with doc.transaction():
-                cells = self._ynb.ycells
-            if isinstance(cells, pycrdt.Array) and len(cells) == 0:
-                await self._broadcast_update()
-                await self._wait_for_sync_completion()
-        except Exception as exc:
-            wslog.debug("Could not broadcast empty-cell strip: %s", exc)
+        # A created notebook is not ready until its placeholder deletion has
+        # reached the WebSocket. Propagate send failures to the caller.
+        if removed:
+            await self._broadcast_update()
 
     async def stop(self) -> None:
         """
@@ -434,14 +445,8 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         # Clear collaboration state
         self._room_id = None
         self._session_id = None
+        self._last_broadcast_state = None
         self._clear_awareness_state()
-
-        # Clear pending updates
-        if self._pending_updates:
-            for future in self._pending_updates.values():
-                if not future.done():
-                    future.cancel()
-            self._pending_updates.clear()
 
     async def is_connected(self) -> bool:
         """True if the WebSocket is open and collaborative session is active."""
@@ -515,6 +520,16 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         tags: list[str] | None = None,
     ) -> int:
         """Append a code cell; set its YText source for cross-build consistency."""
+        index, _ = await self.append_code_cell_with_id(source, metadata=metadata, tags=tags)
+        return index
+
+    async def append_code_cell_with_id(
+        self,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> tuple[int, str]:
+        """Append a code cell and return its index and ID in one transaction."""
         await self._ensure_root()
         if tags is not None:
             validate_tags(tags)
@@ -528,6 +543,7 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                 ycell = self._ynb.create_ycell(make_code_cell_dict("", metadata, tags=tags))
                 self._ynb.ycells.append(ycell)
                 idx = self._ynb.cell_number - 1
+                cell_id = str(ycell.get("id"))
                 try:
                     ysrc = ycell.get("source")
                     if isinstance(ysrc, pycrdt.Text):
@@ -540,9 +556,10 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                     wslog.warning("append_code_cell: failed to set YText source: %s", e)
 
             await self._broadcast_update()
-            await self._wait_for_sync_completion()
-        self._notify({"op": "cells-mutated", "kind": "append_code", "index": idx})
-        return idx
+        self._notify(
+            {"op": "cells-mutated", "kind": "append_code", "index": idx, "cell_id": cell_id}
+        )
+        return idx, cell_id
 
     async def insert_code_cell(
         self,
@@ -574,7 +591,6 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                 except Exception as e:
                     wslog.warning("insert_code_cell: failed to set YText source: %s", e)
             await self._broadcast_update()
-            await self._wait_for_sync_completion()
         self._notify({"op": "cells-mutated", "kind": "insert_code", "index": index})
 
     async def append_markdown_cell(self, source: str, tags: list[str] | None = None) -> int:
@@ -602,7 +618,6 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                 except Exception as e:
                     wslog.warning("append_markdown_cell: failed to set YText source: %s", e)
             await self._broadcast_update()
-            await self._wait_for_sync_completion()
         self._notify({"op": "cells-mutated", "kind": "append_markdown", "index": idx})
         return idx
 
@@ -632,7 +647,6 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                 except Exception as e:
                     wslog.warning("insert_markdown_cell: failed to set YText source: %s", e)
             await self._broadcast_update()
-            await self._wait_for_sync_completion()
         self._notify({"op": "cells-mutated", "kind": "insert_markdown", "index": index})
 
     async def delete_cell(self, index: int) -> None:
@@ -654,7 +668,6 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                     current_len = self._ynb.cell_number
                 raise IndexError(f"delete_cell: index {index} out of range 0..{current_len - 1}")
             await self._broadcast_update()
-            await self._wait_for_sync_completion()
         self._notify({"op": "cells-mutated", "kind": "delete", "index": index})
 
     # ---------- cell addressing by ID ----------
@@ -738,7 +751,6 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                         del cells[from_index]
                         cells.insert(to_index, self._ynb.create_ycell(plain_cell))
             await self._broadcast_update()
-            await self._wait_for_sync_completion()
         self._notify(
             {
                 "op": "cells-mutated",
@@ -774,28 +786,19 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                     ycell = self._ynb.ycells[index]
                     if ycell.get("id") != cell_id:
                         continue
-                    cell = ycell.to_py() or {}
-                    if cell.get("cell_type") != "code":
+                    if ycell.get("cell_type") != "code":
                         raise TypeError("update_cell_outputs_by_id requires a code cell")
-                    source = cell.get("source", "")
-                    if isinstance(source, list):
-                        source = "".join(str(part) for part in source)
+                    source = ytext_to_str(ycell.get("source"))
                     if expected_source is not None and source != expected_source:
                         raise CellSourceChangedError(
                             f"Cell {cell_id!r} source changed during execution"
                         )
-                    cell["outputs"] = sanitized
-                    cell["execution_count"] = execution_count
-                    self._ynb.set_cell(index, cell)
+                    self._ynb._set_ycell_outputs(ycell, sanitized)
+                    ycell["execution_count"] = execution_count
                     break
                 else:
                     raise CellDeletedError(f"Cell {cell_id!r} was deleted")
             await self._broadcast_update()
-            if self._pending_updates:
-                try:
-                    await asyncio.wait_for(self._wait_for_sync_completion(), timeout=1.0)
-                except TimeoutError:
-                    wslog.warning("Output update sync timeout for cell %s", cell_id)
         self._notify({"op": "cells-mutated", "kind": "outputs", "index": index, "cell_id": cell_id})
         return index
 
@@ -852,9 +855,8 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                 with doc.transaction():
                     cells = self._ynb.ycells
                     ycell = cells[index]
-                    cell_dict = ycell.to_py() or {}
                     # Ensure it's a code cell
-                    if cell_dict.get("cell_type") != "code":
+                    if ycell.get("cell_type") != "code":
                         raise TypeError("update_cell_outputs requires a code cell")
                     # Ensure outputs are JSON-serializable
                     try:
@@ -863,20 +865,12 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                         sanitized = loads(dumps(outputs or []))
                     except Exception:
                         sanitized = [dict(o) for o in (outputs or [])]
-                    # Update outputs and execution_count
-                    cell_dict["outputs"] = sanitized
-                    cell_dict["execution_count"] = execution_count
-                    cell_dict.setdefault("metadata", {})
-                    # Write back to YMap with proper Y.doc transaction
-                    self._ynb.set_cell(index, cell_dict)
+                    # Mutate only execution fields. Replacing the YMap would
+                    # discard concurrent source or metadata edits.
+                    self._ynb._set_ycell_outputs(ycell, sanitized)
+                    ycell["execution_count"] = execution_count
 
                 await self._broadcast_update()
-                # Reduced wait to minimize race conditions
-                if self._pending_updates:
-                    await asyncio.wait_for(self._wait_for_sync_completion(), timeout=1.0)
-
-            except TimeoutError:
-                wslog.warning("Output update sync timeout for cell %d, continuing", index)
             except Exception as e:
                 wslog.error("Failed to update cell %d outputs: %s", index, e)
                 raise
@@ -967,10 +961,6 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                     ycell["execution_count"] = execution_count
 
                 await self._broadcast_update()
-                if self._pending_updates:
-                    await asyncio.wait_for(self._wait_for_sync_completion(), timeout=1.0)
-            except TimeoutError:
-                wslog.warning("Output delta sync timeout for cell %d, continuing", index)
             except Exception as e:
                 wslog.error("Failed to update cell %d outputs delta: %s", index, e)
                 raise
@@ -1014,8 +1004,50 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                     f"set_cell_source: index {index} out of range 0..{current_len - 1}"
                 )
             await self._broadcast_update()
-            await self._wait_for_sync_completion()
         self._notify({"op": "cells-mutated", "kind": "set_source", "index": index})
+
+    async def set_cell_source_by_id(
+        self,
+        cell_id: str,
+        source: str,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Resolve, verify, and update a shared cell in one transaction."""
+        await self._ensure_root()
+        async with self._op_lock:
+            doc = self._doc
+            assert doc is not None
+            assert self._ynb is not None
+            with doc.transaction():
+                for index in range(self._ynb.cell_number):
+                    ycell = self._ynb.ycells[index]
+                    if ycell.get("id") != cell_id:
+                        continue
+                    current_source = ytext_to_str(ycell.get("source"))
+                    if expected_source is not None and current_source != expected_source:
+                        raise CellSourceChangedError(
+                            f"Cell {cell_id!r} source changed before update"
+                        )
+                    ysource = ycell.get("source")
+                    if isinstance(ysource, pycrdt.Text):
+                        del ysource[:]
+                        ysource += source
+                    else:
+                        ycell["source"] = pycrdt.Text(source)
+                    break
+                else:
+                    raise CellDeletedError(f"Cell {cell_id!r} was deleted")
+            await self._broadcast_update()
+        self._notify(
+            {
+                "op": "cells-mutated",
+                "kind": "set_source",
+                "index": index,
+                "cell_id": cell_id,
+            }
+        )
+        return index
 
     def on_change(self, cb: Callable[[dict[str, Any]], None]) -> None:
         """
@@ -1131,50 +1163,25 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
 
     async def _broadcast_update(self) -> None:
         """
-        Send a CRDT UPDATE to the room. Relies on pycrdt to build the FULL
-        y-websocket frame (SYNC/UPDATE) so we don't double-wrap.
-        """
-        if not (self._ws and not self._ws.closed) or not self._doc:
-            return
+        Send the unsent CRDT delta to the room.
 
-        update_id = self._update_counter
-        self._update_counter += 1
-        fut = asyncio.Future()
-        self._pending_updates[update_id] = fut
+        The state vector advances only after ``send_bytes`` succeeds, so a
+        failed send remains eligible for retry and is visible to callers.
+        """
+        if not self._doc:
+            raise RuntimeError("Collaborative document is not initialized")
+        if not (self._ws and not self._ws.closed):
+            raise RuntimeError("Collaboration WebSocket is disconnected")
 
         try:
-            update = self._doc.get_update()
+            update = self._doc.get_update(self._last_broadcast_state)
             if update:
                 msg = create_update_message(update)  # FULL frame [0x00 0x02 …]
                 await self._ws.send_bytes(msg)
-            if not fut.done():
-                fut.set_result(None)
+                self._last_broadcast_state = self._doc.get_state()
         except Exception as e:
-            wslog.debug("broadcast update failed: %s", e)
-            if not fut.done():
-                fut.set_exception(e)
-        finally:
-            self._pending_updates.pop(update_id, None)
-
-    async def _wait_for_sync_completion(self) -> None:
-        """Wait for all pending updates to complete synchronization."""
-        if not self._pending_updates:
-            return
-        current = list(self._pending_updates.values())
-        try:
-            await asyncio.wait_for(asyncio.gather(*current, return_exceptions=True), timeout=2.0)
-        except TimeoutError:
-            wslog.debug("Sync completion timeout, cancelling %d pending updates", len(current))
-            for fut in current:
-                if not fut.done():
-                    fut.cancel()
-        except Exception as e:
-            wslog.debug("Error waiting for sync completion: %s", e)
-        finally:
-            # Clear completed/cancelled futures
-            for k, fut in list(self._pending_updates.items()):
-                if fut.done():
-                    self._pending_updates.pop(k, None)
+            wslog.warning("broadcast update failed: %s", e)
+            raise RuntimeError(f"Could not send collaborative update: {e}") from e
 
     async def _send_awareness(self) -> None:
         """Broadcast current awareness state (pycrdt builds the full frame)."""

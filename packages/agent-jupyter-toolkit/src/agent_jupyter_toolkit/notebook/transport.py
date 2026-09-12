@@ -141,6 +141,26 @@ class NotebookDocumentTransport(Protocol):
         """
         ...
 
+    async def append_code_cell_with_id(
+        self,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> tuple[int, str]:
+        """Append a code cell and return its index and stable identifier.
+
+        Concrete transports SHOULD create and return the identifier in the
+        same serialized mutation. This compatibility implementation performs
+        a follow-up read and therefore cannot protect third-party transports
+        from a concurrent reorder between the two operations.
+        """
+        index = await self.append_code_cell(source, metadata=metadata, tags=tags)
+        cell = await self.get_cell(index)
+        cell_id = cell.get("id")
+        if not isinstance(cell_id, str) or not cell_id:
+            raise RuntimeError("Appended notebook cell has no stable id")
+        return index, cell_id
+
     async def insert_code_cell(
         self,
         index: int,
@@ -257,6 +277,29 @@ class NotebookDocumentTransport(Protocol):
             IndexError: if index is out of range.
         """
         ...
+
+    async def set_cell_source_by_id(
+        self,
+        cell_id: str,
+        source: str,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Set a cell's source while checking its stable identity.
+
+        Concrete transports SHOULD resolve, verify, and mutate atomically.
+        """
+        from .types import CellDeletedError, CellSourceChangedError
+
+        try:
+            index = await self.resolve_cell_index(cell_id)
+            cell = await self.get_cell(index)
+        except KeyError as exc:
+            raise CellDeletedError(f"Cell {cell_id!r} was deleted") from exc
+        if expected_source is not None and cell.get("source") != expected_source:
+            raise CellSourceChangedError(f"Cell {cell_id!r} source changed before update")
+        await self.set_cell_source(index, source)
+        return index
 
     async def get_cell(self, index: int) -> dict[str, Any]:
         """

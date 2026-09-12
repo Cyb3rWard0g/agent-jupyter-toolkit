@@ -1,6 +1,6 @@
 # Tools Reference
 
-The MCP Jupyter Notebook server exposes **37 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** for database exploration and query→DataFrame workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
+The MCP Jupyter Notebook server exposes **43 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** for database exploration and query→DataFrame workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
 
 > **Multi-notebook support:** Every tool accepts an optional `notebook_path` parameter. When omitted, the tool targets the default notebook (backward compatible with single-notebook setups).
 
@@ -108,7 +108,8 @@ Append a new code cell to the notebook, execute it, and return outputs.
 
 **Returns:** ordinary output fields plus `cell_id`, `request_id`, `source_hash`,
 `kernel_generation`, `persistence_status`, `persistence_error`,
-`output_truncated`, `dropped_output_bytes`, `outcome`, and `timed_out`.
+`output_truncated`, `dropped_output_bytes`, `callback_status`, `callback_error`,
+`callback_snapshots_coalesced`, `outcome`, and `timed_out`.
 
 Execution success and notebook persistence are separate. A stale/deleted cell can
 return successful kernel output with `persistence_status="error"`. A timeout or
@@ -145,9 +146,11 @@ Execute code directly in the kernel **without** creating a notebook cell. Use th
 |---|---|---|---|---|
 | `code` | `string` | Yes | — | Python code to execute |
 | `timeout` | `float` | No | `120.0` | Execution timeout in seconds |
+| `subshell_id` | `string` | No | `null` | Execute in an ID returned by `notebook_subshell_create` |
 
 **Returns:** ordinary output fields plus `request_id`, `kernel_generation`,
-`output_truncated`, `dropped_output_bytes`, `outcome`, and `timed_out`.
+`output_truncated`, `dropped_output_bytes`, `callback_status`, `callback_error`,
+`callback_snapshots_coalesced`, `outcome`, and `timed_out`.
 
 **Example prompt:** *"Check if scikit-learn is importable without adding a cell"*
 
@@ -394,7 +397,9 @@ Return the number of cells currently in the notebook.
 
 ### `notebook_packages_install`
 
-Install Python packages in the kernel environment. Accepts pip-style version specifiers and skips packages that are already available.
+Install Python packages in the kernel environment. Inputs are PEP 508
+requirements, and installation is skipped only when the kernel distribution
+satisfies the requested version, marker, and extras.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -406,17 +411,46 @@ Install Python packages in the kernel environment. Accepts pip-style version spe
 
 ---
 
+### `notebook_packages_uninstall`
+
+Uninstall distributions from the kernel. Each input is parsed as a PEP 508
+requirement, and the parsed distribution name is passed to pip/uv. Matching
+canonical entries are removed from notebook dependency metadata by default.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `packages` | `list[str]` | Yes | — | Distribution requirements to uninstall |
+| `untrack` | `bool` | No | `true` | Remove successful uninstalls from tracked metadata |
+
+**Returns:** `ok`, `packages`, `report`, `untracked`
+
+---
+
 ### `notebook_packages_check`
 
 Check which packages are available in the kernel without installing anything.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `packages` | `list[str]` | Yes | — | Package names to check |
+| `packages` | `list[str]` | Yes | — | PEP 508 requirements to check |
 
 **Returns:** `ok`, `packages` (mapping of name → `true`/`false`)
 
 **Example prompt:** *"Check if numpy and scipy are available"*
+
+---
+
+### `notebook_dependencies_list`
+
+List dependencies tracked in notebook metadata. Entries use canonical
+distribution names and include the requested requirement, resolved version,
+and installation timestamp.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| *(none)* | — | — | — | — |
+
+**Returns:** `ok`, `dependencies`, `count`
 
 ---
 
@@ -494,6 +528,48 @@ Restart the Jupyter kernel, clearing all state. Shuts down the running kernel an
 **Returns:** `ok`
 
 **Example prompt:** *"Restart the kernel — I need a clean slate"*
+
+---
+
+### `notebook_subshell_create`
+
+Create a kernel subshell and return its stable ID. The kernel must advertise
+`"kernel subshells"` in `notebook_kernel_info.supported_features`.
+
+**Returns:** `ok`, `subshell_id`, or a capability error
+
+---
+
+### `notebook_subshell_list`
+
+List active subshell IDs on a capable kernel.
+
+**Returns:** `ok`, `subshell_ids`, or a capability error
+
+---
+
+### `notebook_subshell_delete`
+
+Delete a kernel subshell.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `subshell_id` | `string` | Yes | — | Stable subshell ID to delete |
+
+**Returns:** `ok`, `subshell_id`, or an error
+
+---
+
+### `notebook_debug_request`
+
+Send a Debug Adapter Protocol request over the kernel control channel. The
+kernel must advertise `"debugger"` in its supported features.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `request` | `object` | Yes | — | DAP request payload expected by the kernel |
+
+**Returns:** `ok`, `response`, or a capability error
 
 ---
 

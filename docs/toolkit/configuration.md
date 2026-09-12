@@ -21,6 +21,7 @@ passed to `create_session()`:
 | `env` | `dict[str, str] \| None` | `None` | Environment overrides merged into the launch environment |
 | `kernel_args` | `list[str]` | `[]` | Additional kernelspec launch arguments |
 | `max_output_bytes` | `int \| None` | `52428800` | Visible output budget; `None` disables the limit |
+| `output_callback_timeout` | `float \| None` | `30.0` | Per-callback delivery limit; `None` disables it |
 | `transport_encryption` | `str` | `"disabled"` | CurveZMQ policy: `disabled`, `auto`, or `required` |
 | `manager_factory` | `Callable \| None` | `None` | Factory implementing the toolkit's `KernelManager` interface |
 | `server` | `ServerConfig \| None` | `None` | Required when `mode="server"` |
@@ -42,6 +43,7 @@ rejected in attachment mode.
 | `request_timeout` | `float` | `30.0` | Timeout for server control requests |
 | `startup_timeout` | `float` | `60.0` | Timeout for restart/readiness checks |
 | `max_output_bytes` | `int \| None` | `52428800` | Visible output budget; `None` disables the limit |
+| `output_callback_timeout` | `float \| None` | `30.0` | Per-callback delivery limit; `None` disables it |
 
 ### Example
 
@@ -178,7 +180,8 @@ path = ensure_allowed(Path("/etc/passwd"))
 
 `VariableManager.set()` serializes values via base64-encoded JSON to prevent
 code injection through crafted variable names or values. Variable names are
-validated as legal Python identifiers.
+validated as legal Python identifiers. Non-JSON values, non-finite numbers, and
+kernel-side assignment errors are rejected instead of falling back to `repr()`.
 
 ### Pickle warnings
 

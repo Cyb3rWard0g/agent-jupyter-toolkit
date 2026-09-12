@@ -19,6 +19,7 @@ class ExecutionState:
         self.user_expressions: dict[str, Any] | None = None
         self._pending_clear = False
         self._display_indices: dict[str, set[int]] = {}
+        self._stream_chunks: dict[int, list[str]] = {}
         self.display_updates: dict[str, dict[str, Any]] = {}
         self.max_output_bytes = max_output_bytes
         self.output_truncated = False
@@ -54,9 +55,11 @@ class ExecutionState:
                 and self.outputs[-1].get("output_type") == "stream"
                 and self.outputs[-1].get("name") == name
             ):
-                self.outputs[-1]["text"] += text
+                index = len(self.outputs) - 1
+                self._stream_chunks.setdefault(index, [self.outputs[index]["text"]]).append(text)
             else:
                 self.outputs.append({"output_type": "stream", "name": name, "text": text})
+                self._stream_chunks[len(self.outputs) - 1] = [text]
             return True
         if msg_type in {"display_data", "execute_result"}:
             self._clear_if_pending()
@@ -133,18 +136,19 @@ class ExecutionState:
 
     def snapshot(self) -> tuple[list[dict[str, Any]], int | None]:
         """Return an isolated visible-output snapshot for callbacks."""
-        return deepcopy(self.outputs), self.execution_count
+        return self._materialized_outputs(), self.execution_count
 
     def result(self) -> ExecutionResult:
         """Build the public result from the current state."""
+        outputs = self._materialized_outputs()
         stdout = "".join(
             output.get("text", "")
-            for output in self.outputs
+            for output in outputs
             if output.get("output_type") == "stream" and output.get("name") == "stdout"
         )
         stderr = "".join(
             output.get("text", "")
-            for output in self.outputs
+            for output in outputs
             if output.get("output_type") == "stream" and output.get("name") == "stderr"
         )
         return ExecutionResult(
@@ -152,7 +156,7 @@ class ExecutionState:
             execution_count=self.execution_count,
             stdout=stdout,
             stderr=stderr,
-            outputs=deepcopy(self.outputs),
+            outputs=outputs,
             user_expressions=deepcopy(self.user_expressions),
             output_truncated=self.output_truncated,
             dropped_output_bytes=self.dropped_output_bytes,
@@ -168,6 +172,7 @@ class ExecutionState:
 
     def _clear_visible(self) -> None:
         self.outputs.clear()
+        self._stream_chunks.clear()
         self._display_indices.clear()
         self._pending_clear = False
         self._output_bytes = self._display_update_bytes
@@ -208,3 +213,10 @@ class ExecutionState:
     @staticmethod
     def _measure(output: dict[str, Any]) -> int:
         return len(json.dumps(output, default=str, ensure_ascii=False).encode("utf-8"))
+
+    def _materialized_outputs(self) -> list[dict[str, Any]]:
+        outputs = deepcopy(self.outputs)
+        for index, chunks in self._stream_chunks.items():
+            if index < len(outputs):
+                outputs[index]["text"] = "".join(chunks)
+        return outputs
