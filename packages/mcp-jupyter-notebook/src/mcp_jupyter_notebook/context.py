@@ -45,6 +45,8 @@ class SessionManager:
         self._config = config
         self._sessions: dict[str, NotebookSession] = {}
         self._opening: dict[str, asyncio.Task[NotebookSession]] = {}
+        self._closing: dict[str, asyncio.Task[None]] = {}
+        self._deleting: dict[str, asyncio.Task[bool]] = {}
         self._registry_lock = asyncio.Lock()
         self.default_path: str | None = (
             self._session_key(default_path) if default_path is not None else None
@@ -85,18 +87,25 @@ class SessionManager:
             If the session cannot be created or started.
         """
         path = self._session_key(path)
-        async with self._registry_lock:
-            existing = self._sessions.get(path)
-            if existing is not None:
-                log.debug("Reusing existing session for %s", path)
-                return existing
-            task = self._opening.get(path)
-            if task is None:
-                task = asyncio.create_task(
-                    self._open_new_session(path),
-                    name=f"mcp-jupyter-open:{path}",
-                )
-                self._opening[path] = task
+        while True:
+            async with self._registry_lock:
+                teardown = self._deleting.get(path) or self._closing.get(path)
+                if teardown is None:
+                    existing = self._sessions.get(path)
+                    if existing is not None:
+                        log.debug("Reusing existing session for %s", path)
+                        return existing
+                    task = self._opening.get(path)
+                    if task is None:
+                        task = asyncio.create_task(
+                            self._open_new_session(path),
+                            name=f"mcp-jupyter-open:{path}",
+                        )
+                        self._opening[path] = task
+                    break
+            # A session removed from the registry may still be shutting down
+            # its server kernel. Reopen only after that teardown completes.
+            await asyncio.shield(teardown)
         return await asyncio.shield(task)
 
     async def close(self, path: str) -> bool:
@@ -114,34 +123,29 @@ class SessionManager:
             it was not open.
         """
         path = self._session_key(path)
-        async with self._registry_lock:
-            opening = self._opening.get(path)
-        if opening is not None:
+        while True:
+            async with self._registry_lock:
+                closing = self._closing.get(path)
+                if closing is not None:
+                    task = closing
+                    break
+                opening = self._opening.get(path)
+                if opening is None:
+                    session = self._sessions.pop(path, None)
+                    if session is None:
+                        return False
+                    task = asyncio.create_task(
+                        self._close_session(path, session),
+                        name=f"mcp-jupyter-close:{path}",
+                    )
+                    self._closing[path] = task
+                    break
             try:
                 await asyncio.shield(opening)
             except Exception:
                 pass
 
-        async with self._registry_lock:
-            session = self._sessions.pop(path, None)
-        if session is None:
-            return False
-
-        log.info("Closing notebook session: %s", path)
-        try:
-            await session.stop()
-        except Exception as exc:
-            log.warning("Error stopping session for %s: %s", path, exc)
-
-        # Update default if we just closed it
-        async with self._registry_lock:
-            if self.default_path == path:
-                self.default_path = next(iter(self._sessions), None)
-                if self.default_path:
-                    log.info("Default notebook changed to: %s", self.default_path)
-                else:
-                    log.info("No notebooks remaining; default cleared")
-
+        await asyncio.shield(task)
         return True
 
     async def delete(self, path: str) -> bool:
@@ -165,20 +169,28 @@ class SessionManager:
         RuntimeError
             If the file exists but deletion fails.
         """
-        # Close session first (idempotent — returns False if not open)
         path = self._session_key(path)
-        await self.close(path)
-
-        if self._config["mode"] == "local":
-            return self._delete_local_file(path)
-        else:
-            return await self._delete_server_file(path)
+        async with self._registry_lock:
+            task = self._deleting.get(path)
+            if task is None:
+                task = asyncio.create_task(
+                    self._delete_path(path),
+                    name=f"mcp-jupyter-delete:{path}",
+                )
+                self._deleting[path] = task
+        return await asyncio.shield(task)
 
     async def close_all(self) -> None:
         """Close every open session.  Used during server shutdown."""
-        paths = list(dict.fromkeys([*self._sessions, *self._opening]))
+        paths = list(
+            dict.fromkeys([*self._sessions, *self._opening, *self._closing, *self._deleting])
+        )
         for p in paths:
             await self.close(p)
+        async with self._registry_lock:
+            deleting = list(self._deleting.values())
+        if deleting:
+            await asyncio.gather(*(asyncio.shield(task) for task in deleting))
 
     def get(self, path: str | None = None) -> NotebookSession:
         """Retrieve a session by path, falling back to the default.
@@ -293,6 +305,36 @@ class SessionManager:
             async with self._registry_lock:
                 if self._opening.get(path) is asyncio.current_task():
                     self._opening.pop(path, None)
+
+    async def _close_session(self, path: str, session: NotebookSession) -> None:
+        """Stop one session and release its per-path close barrier."""
+        log.info("Closing notebook session: %s", path)
+        try:
+            await session.stop()
+        except Exception as exc:
+            log.warning("Error stopping session for %s: %s", path, exc)
+        finally:
+            async with self._registry_lock:
+                if self.default_path == path:
+                    self.default_path = next(iter(self._sessions), None)
+                    if self.default_path:
+                        log.info("Default notebook changed to: %s", self.default_path)
+                    else:
+                        log.info("No notebooks remaining; default cleared")
+                if self._closing.get(path) is asyncio.current_task():
+                    self._closing.pop(path, None)
+
+    async def _delete_path(self, path: str) -> bool:
+        """Close and delete a path while preventing it from being reopened."""
+        try:
+            await self.close(path)
+            if self._config["mode"] == "local":
+                return self._delete_local_file(path)
+            return await self._delete_server_file(path)
+        finally:
+            async with self._registry_lock:
+                if self._deleting.get(path) is asyncio.current_task():
+                    self._deleting.pop(path, None)
 
     def _list_local_files(self, directory: str, recursive: bool) -> list[dict[str, Any]]:
         """Scan the local filesystem for ``.ipynb`` files."""

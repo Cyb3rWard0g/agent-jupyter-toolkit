@@ -6,14 +6,32 @@ These tests verify:
   - NotebookSession.install_packages() / uninstall_packages() / get_tracked_dependencies()
 """
 
+import contextlib
+import io
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nbformat
 import pytest
 
+from agent_jupyter_toolkit.kernel import ExecutionResult
 from agent_jupyter_toolkit.notebook import NotebookSession, make_document_transport
+from agent_jupyter_toolkit.utils.packages import uninstall_packages
 
 pytestmark = pytest.mark.asyncio
+
+
+class InlineKernel:
+    """Execute generated package helper code without starting another process."""
+
+    async def is_alive(self):
+        return True
+
+    async def execute(self, code, **_kwargs):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exec(code, {})
+        return ExecutionResult(status="ok", stdout=output.getvalue())
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +158,21 @@ async def test_update_metadata_fires_change_callback(tmp_path):
     assert len(events) == 1
     assert events[0]["op"] == "metadata-updated"
     assert "foo" in events[0]["keys"]
+
+
+async def test_uninstall_uses_distribution_presence_not_requirement_satisfaction():
+    """A mismatched version constraint must still uninstall the named distribution."""
+    completed = SimpleNamespace(returncode=1, stderr="blocked for test")
+    with patch("subprocess.run", return_value=completed) as run:
+        result = await uninstall_packages(InlineKernel(), ["packaging>9999"])
+
+    entry = result["report"]["packaging>9999"]
+    assert entry["was_installed"] is True
+    assert entry["uninstalled"] is False
+    assert entry["error"] == "uninstall exit code 1"
+    command = run.call_args.args[0]
+    assert "packaging" in command
+    assert "packaging>9999" not in command
 
 
 # ---------------------------------------------------------------------------

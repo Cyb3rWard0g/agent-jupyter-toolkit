@@ -375,3 +375,76 @@ async def test_server_routes_control_reply_while_execution_lock_is_held():
         result = await asyncio.wait_for(task, 1)
 
     assert result["success"] is True
+
+
+async def test_server_unregisters_execution_before_waiting_for_final_callback():
+    transport = ServerTransport(ServerConfig(base_url="http://unused", output_callback_timeout=1.0))
+    transport._session = SimpleNamespace()
+    transport._kernel_id = "kernel-1"
+    transport._supported_features = {"debugger"}
+    transport._ws = SimpleNamespace(
+        closed=False,
+        send_json=AsyncMock(),
+        send_bytes=AsyncMock(),
+    )
+    callback_started = asyncio.Event()
+    release_callback = asyncio.Event()
+
+    async def callback(*_args):
+        callback_started.set()
+        await release_callback.wait()
+
+    execution = asyncio.create_task(transport.execute("pass", output_callback=callback))
+    try:
+        for _ in range(10):
+            if transport._ws.send_json.await_count:
+                break
+            await asyncio.sleep(0)
+        execute_request = transport._ws.send_json.await_args.args[0]
+        request_id = execute_request["header"]["msg_id"]
+        for msg_type, content in (
+            ("execute_reply", {"status": "ok"}),
+            ("status", {"execution_state": "idle"}),
+        ):
+            await transport._dispatch_frame(
+                {
+                    "header": {"msg_type": msg_type},
+                    "parent_header": {"msg_id": request_id},
+                    "content": content,
+                }
+            )
+        await callback_started.wait()
+        assert request_id not in transport._request_queues
+
+        async def dispatch_late_output():
+            for _ in range(33):
+                await transport._dispatch_frame(
+                    {
+                        "header": {"msg_type": "stream"},
+                        "parent_header": {"msg_id": request_id},
+                        "content": {"name": "stdout", "text": "late"},
+                    }
+                )
+
+        await asyncio.wait_for(dispatch_late_output(), 0.1)
+
+        debug = asyncio.create_task(
+            transport.debug({"seq": 1, "type": "request", "command": "debugInfo"})
+        )
+        for _ in range(10):
+            if transport._ws.send_json.await_count >= 2:
+                break
+            await asyncio.sleep(0)
+        debug_request = transport._ws.send_json.await_args.args[0]
+        await transport._dispatch_frame(
+            {
+                "header": {"msg_type": "debug_reply"},
+                "parent_header": {"msg_id": debug_request["header"]["msg_id"]},
+                "content": {"success": True},
+            }
+        )
+        assert (await asyncio.wait_for(debug, 0.1))["success"] is True
+    finally:
+        release_callback.set()
+
+    assert (await execution).status == "ok"

@@ -205,6 +205,39 @@ async def test_collaborative_output_update_preserves_concurrent_source_edit(monk
         assert cell["outputs"][0]["text"] == "done\n"
 
 
+async def test_collaborative_metadata_updates_persist_and_merge_by_key(monkeypatch):
+    doc_a = pycrdt.Doc()
+    notebook_a = YNotebook(doc_a)
+    notebook_a.set(nbformat.v4.new_notebook(metadata={"existing": "keep"}))
+    doc_b = pycrdt.Doc()
+    doc_b.apply_update(doc_a.get_update())
+    notebook_b = YNotebook(doc_b)
+    state_a = doc_a.get_state()
+    state_b = doc_b.get_state()
+
+    transports = []
+    for doc, notebook in ((doc_a, notebook_a), (doc_b, notebook_b)):
+        transport = CollabYjsDocumentTransport("http://unused", "metadata.ipynb")
+        transport._doc = doc
+        transport._ynb = notebook
+        transport._cells = notebook.ycells
+        transport._initial_sync_done.set()
+        monkeypatch.setattr(transport, "_broadcast_update", AsyncMock())
+        transports.append(transport)
+
+    await transports[0].update_metadata({"first": {"version": "1"}})
+    await transports[1].update_metadata({"second": [1, 2]})
+
+    doc_a.apply_update(doc_b.get_update(state_b))
+    doc_b.apply_update(doc_a.get_update(state_a))
+    for transport in transports:
+        metadata = await transport.get_metadata()
+        assert metadata["existing"] == "keep"
+        assert metadata["first"] == {"version": "1"}
+        assert metadata["second"] == [1, 2]
+        transport._broadcast_update.assert_awaited_once()
+
+
 async def test_collaborative_placeholder_cleanup_preserves_meaningful_blank_cell(monkeypatch):
     transport = CollabYjsDocumentTransport("http://unused", "blank.ipynb")
     doc = pycrdt.Doc()
@@ -372,6 +405,23 @@ async def test_display_updates_do_not_overwrite_replaced_outputs(tmp_path, inval
         _, result = await session.append_and_run("update old handle")
         assert result.persistence_status == "ok"
         assert (await doc.get_cell(0))["outputs"] == before
+
+
+async def test_display_update_discards_a_deleted_target(tmp_path):
+    doc = LocalFileDocumentTransport(str(tmp_path / "deleted-display.ipynb"))
+    kernel = DisplayKernel(
+        [
+            display_result("before", "display_data"),
+            display_result("after", "update_display_data"),
+        ]
+    )
+    async with NotebookSession(kernel=kernel, doc=doc) as session:
+        await session.append_and_run("create handle")
+        await doc.delete_cell(0)
+        _, result = await session.append_and_run("update deleted handle")
+
+    assert result.status == "ok"
+    assert result.persistence_status == "ok"
 
 
 async def test_disconnect_keeps_partial_outputs_and_identity_without_replay(tmp_path):

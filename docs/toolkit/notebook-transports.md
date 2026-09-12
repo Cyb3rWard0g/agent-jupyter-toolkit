@@ -148,6 +148,8 @@ Features:
   its untouched, metadata-free placeholder removed; meaningful blank cells are
   preserved
 - Required/preferred/disabled selection with classified preferred-mode fallback
+- Shared notebook metadata uses per-key CRDT updates, so dependency tracking and
+  unrelated concurrent metadata edits converge without replacing the whole map
 
 `collaboration_mode="required"` propagates every collaboration startup error.
 `"preferred"` falls back to Contents only for an unsupported collaboration API

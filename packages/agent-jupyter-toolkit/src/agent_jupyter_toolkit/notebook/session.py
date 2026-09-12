@@ -276,7 +276,7 @@ class NotebookSession:
                         expected_source,
                         {index: _output_fingerprint(outputs[index]) for index in expected_outputs},
                     )
-                except CellDeletedError:
+                except (CellDeletedError, KeyError):
                     targets.pop(target_cell_id, None)
                 except Exception as exc:
                     if persistence_error is None:

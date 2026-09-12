@@ -239,7 +239,9 @@ status = await check_package_availability(
 Inputs are parsed as PEP 508 requirements before any kernel code runs. Checks
 use the distribution installed in the kernel and honor version specifiers,
 environment markers, requested extras, and the dependencies activated by those
-extras. Invalid requirements raise `ValueError`.
+extras. Invalid requirements and direct URL references raise `ValueError`;
+package operations require a distribution name with an optional version,
+extras, and marker expression.
 
 ### `ensure_packages()`
 
@@ -303,8 +305,10 @@ agent process's interpreter.
 
 `NotebookSession.install_packages()` stores dependencies under their canonical
 distribution name and records both the requested requirement and resolved
-version. Uninstall accepts a full requirement but passes only its parsed
-distribution name to pip/uv and removes matching tracked entries.
+version. Uninstall accepts a full requirement but checks installation and
+removal by its parsed distribution name, regardless of whether the installed
+version satisfies the supplied constraint. It passes only that name to pip/uv
+and removes matching tracked entries.
 
 ### Pre-defined package groups
 

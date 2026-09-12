@@ -74,13 +74,25 @@ async def test_two_collaboration_clients_merge_source_and_output_updates():
             first.update_cell_outputs_by_id(cell_id, output, 1),
             second.set_cell_source_by_id(cell_id, "collaborator edit"),
         )
+        await asyncio.gather(
+            first.update_metadata({"writer_one": {"status": "ready"}}),
+            second.update_metadata({"writer_two": ["ready"]}),
+        )
 
         for _attempt in range(30):
-            cells = [await client.get_cell_by_id(cell_id) for client in (first, second)]
+            snapshots = [await client.fetch() for client in (first, second)]
+            cells = [
+                next(cell for cell in snapshot["cells"] if cell.get("id") == cell_id)
+                for snapshot in snapshots
+            ]
             if all(
                 cell["source"] == "collaborator edit"
                 and cell.get("outputs", [{}])[0].get("text") == "done\n"
                 for cell in cells
+            ) and all(
+                snapshot["metadata"].get("writer_one") == {"status": "ready"}
+                and snapshot["metadata"].get("writer_two") == ["ready"]
+                for snapshot in snapshots
             ):
                 break
             await asyncio.sleep(0.1)

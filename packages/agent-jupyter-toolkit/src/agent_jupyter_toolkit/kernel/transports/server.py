@@ -447,6 +447,10 @@ class ServerTransport(KernelTransport):
 
                 res = state.result()
                 res.request_id = request_id
+                # Execution collection is complete. Stop routing late IOPub
+                # frames to this bounded queue before waiting for a potentially
+                # slow final callback, otherwise the WebSocket pump can stall.
+                self._unregister_request(request_id)
                 await _finish_callbacks(res)
 
                 # Trigger post-execution hooks for instrumentation/cleanup
@@ -463,9 +467,11 @@ class ServerTransport(KernelTransport):
                 return res
 
             except asyncio.CancelledError:
+                self._unregister_request(request_id)
                 await callbacks.cancel()
                 raise
             except KernelDisconnectedError as e:
+                self._unregister_request(request_id)
                 if e.partial_result is None:
                     e.partial_result = state.result()
                     e.partial_result.request_id = request_id
@@ -475,6 +481,7 @@ class ServerTransport(KernelTransport):
                 kernel_hooks.trigger_on_error_hooks(e)
                 raise
             except TimeoutError as e:
+                self._unregister_request(request_id)
                 res = state.result()
                 res.request_id = request_id
                 res.status = "error"
@@ -485,6 +492,7 @@ class ServerTransport(KernelTransport):
                 kernel_hooks.trigger_on_error_hooks(e)
                 return res
             except Exception as e:
+                self._unregister_request(request_id)
                 await callbacks.finish()
                 # Trigger error hooks for consistent error handling
                 kernel_hooks.trigger_on_error_hooks(e)

@@ -57,8 +57,7 @@ Contains the FastMCP server creation, configuration processing, session construc
 | Function | Purpose |
 |---|---|
 | `process_config(args)` | Merges CLI args with env vars (CLI wins). Returns a flat config dict. |
-| `_build_session(cfg)` | Constructs a `NotebookSession` from the config — creates kernel and doc transports based on the session mode. |
-| `app_lifespan(server)` | Async context manager that starts the `NotebookSession`, yields an `AppContext`, and cleans up on shutdown. |
+| `app_lifespan(server)` | Creates the `SessionManager`, opens the optional default notebook, yields an `AppContext`, and closes every session on shutdown. |
 | `create_server()` | Creates the `FastMCP` instance, attaches the lifespan, and registers all tools. |
 | `run_server(cfg)` | Async entry point — sets the global config and runs the server with the configured transport. |
 
@@ -66,23 +65,33 @@ Contains the FastMCP server creation, configuration processing, session construc
 
 ### `context.py` — Shared State
 
-A simple `@dataclass` that holds the `NotebookSession`. This is yielded by the lifespan and available to all tools via the MCP `Context`:
+`AppContext` holds a `SessionManager`, which owns the live notebook sessions.
+It is yielded by the lifespan and available to all tools through the MCP
+`Context`:
 
 ```python
 @dataclass
 class AppContext:
-    session: NotebookSession
+    manager: SessionManager
 ```
 
 Tools access it as:
 
 ```python
-session = ctx.request_context.lifespan_context.session
+manager = ctx.request_context.lifespan_context.manager
+session = manager.get(notebook_path)
 ```
 
-### `tools.py` — Tool Definitions
+The manager shares concurrent opens for the same canonical path. Close and
+delete operations install per-path barriers before transport shutdown starts,
+so another open cannot attach to a server kernel during teardown or recreate a
+session before file deletion completes.
 
-All 27 MCP tools are registered inside `register_notebook_tools(mcp)`. Each tool is a decorated async function with `ToolAnnotations` describing its behavior:
+### Tool Definitions
+
+All 43 core MCP tools are registered through `register_notebook_tools(mcp)`.
+Each tool is a decorated async function with `ToolAnnotations` describing its
+behavior:
 
 ```python
 from mcp.types import ToolAnnotations
@@ -158,29 +167,33 @@ doc = create_notebook_transport("local", notebook_path, prefer_collab=False)
 `SessionManager.open()` canonicalizes paths and shares one in-flight startup
 task for concurrent requests targeting the same notebook. The session enters
 the registry only after both transports start successfully; failed starts clean
-up partial resources and remain retryable.
+up partial resources and remain retryable. Open requests also wait for any
+in-flight close or delete of the same path, preventing reuse of a kernel during
+teardown and file deletion.
 
 ---
 
 ## Lifespan Management
 
-The server uses FastMCP's lifespan pattern to manage the `NotebookSession`:
+The server uses FastMCP's lifespan pattern to manage all notebook sessions:
 
 ```python
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    session = _build_session(_server_config)
-    await session.start()       # Connect kernel WS, join collab room
+    manager = SessionManager(config=_server_config)
+    default_path = _server_config.get("notebook_path")
+    if default_path:
+        await manager.open(default_path)
     try:
-        yield AppContext(session=session)
+        yield AppContext(manager=manager)
     finally:
-        await session.stop()    # Disconnect WS, leave collab room
+        await manager.close_all()
 ```
 
 This ensures:
-- The kernel and document transports are fully connected **before** any tools are called
+- A configured default notebook is connected before any tools are called
 - Cleanup happens gracefully on shutdown (even on errors)
-- All tools share a single session instance — no per-request overhead
+- Tools share sessions by canonical notebook path
 
 ---
 

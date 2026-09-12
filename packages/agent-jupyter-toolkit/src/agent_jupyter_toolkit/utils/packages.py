@@ -30,7 +30,9 @@ def _dist_satisfies(req, *, evaluate_marker=True):
 
 def requirement_satisfied(raw):
     req = _Requirement(raw)
-    if not _dist_satisfies(req):
+    if req.marker is not None and not req.marker.evaluate():
+        return True
+    if not _dist_satisfies(req, evaluate_marker=False):
         return False
     if not req.extras:
         return True
@@ -62,9 +64,14 @@ def _validate_requirements(packages: list[str]) -> None:
         raise TypeError("packages must be a list of PEP 508 requirement strings")
     for package in packages:
         try:
-            Requirement(package)
+            requirement = Requirement(package)
         except InvalidRequirement as exc:
             raise ValueError(f"Invalid package requirement: {package!r}") from exc
+        if requirement.url is not None:
+            raise ValueError(
+                f"Direct URL requirements are not supported: {package!r}. "
+                "Use a distribution name with an optional version specifier."
+            )
 
 
 async def _run_json(session, code: str, *, timeout: float) -> dict[str, Any]:
@@ -311,7 +318,11 @@ PKGS = {packages!r}
 {_REQUIREMENT_HELPERS}
 
 def is_installed(pip_name: str) -> bool:
-    return requirement_satisfied(pip_name)
+    try:
+        _im.version(requirement_name(pip_name))
+    except _im.PackageNotFoundError:
+        return False
+    return True
 
 def _uninstall_cmd(pip_name: str) -> list[str]:
     uv = shutil.which("uv")

@@ -18,6 +18,7 @@ Note: This transport requires a Jupyter server with collaboration features enabl
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -470,6 +471,41 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         with doc.transaction():
             # exact nbformat-like dict from jupyter_ydoc
             return self._ynb.source
+
+    async def get_metadata(self) -> dict[str, Any]:
+        """Return an isolated copy of the shared notebook metadata."""
+        await self._ensure_root()
+        doc = self._doc
+        assert doc is not None
+        assert self._ynb is not None
+        with doc.transaction():
+            metadata = self._ynb._ymeta.get("metadata")
+            value = metadata.to_py() if hasattr(metadata, "to_py") else metadata
+            return json.loads(json.dumps(value or {}))
+
+    async def update_metadata(self, updates: dict[str, Any]) -> None:
+        """Shallow-merge notebook metadata as individual shared-map updates."""
+        if not isinstance(updates, dict):
+            raise TypeError("update_metadata: 'updates' must be a dict")
+        try:
+            sanitized = json.loads(json.dumps(updates, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("update_metadata: values must be JSON-compatible") from exc
+
+        await self._ensure_root()
+        async with self._op_lock:
+            doc = self._doc
+            assert doc is not None
+            assert self._ynb is not None
+            with doc.transaction():
+                metadata = self._ynb._ymeta.get("metadata")
+                if not isinstance(metadata, pycrdt.Map):
+                    metadata = pycrdt.Map()
+                    self._ynb._ymeta["metadata"] = metadata
+                for key, value in sanitized.items():
+                    metadata[key] = value
+            await self._broadcast_update()
+        self._notify({"op": "metadata-updated", "keys": list(sanitized)})
 
     async def get_cell(self, index: int) -> dict[str, Any]:
         """Return the cell at *index* directly from the Yjs CRDT.

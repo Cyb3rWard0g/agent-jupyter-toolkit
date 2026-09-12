@@ -399,7 +399,8 @@ Return the number of cells currently in the notebook.
 
 Install Python packages in the kernel environment. Inputs are PEP 508
 requirements, and installation is skipped only when the kernel distribution
-satisfies the requested version, marker, and extras.
+satisfies the requested version, marker, and extras. Direct URL references are
+rejected; use a distribution name with optional constraints.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -416,6 +417,8 @@ satisfies the requested version, marker, and extras.
 Uninstall distributions from the kernel. Each input is parsed as a PEP 508
 requirement, and the parsed distribution name is passed to pip/uv. Matching
 canonical entries are removed from notebook dependency metadata by default.
+Distribution presence is checked by name, so a mismatched version constraint
+does not incorrectly skip removal.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|

@@ -562,7 +562,8 @@ WEB_PACKAGES: list[str]
 ```
 
 Package arguments are PEP 508 requirement strings. Availability checks honor
-versions, markers, and extras in the kernel environment.
+versions, markers, and extras in the kernel environment. Direct URL references
+are rejected because installed provenance cannot be verified consistently.
 
 ### Notebook File Helpers
 

@@ -42,14 +42,25 @@ async def test_package_availability_honors_pep508_constraints():
     try:
         with pytest.raises(ValueError, match="Invalid package requirement"):
             await check_package_availability(sess, ["not a valid requirement!!"])
+        with pytest.raises(ValueError, match="Direct URL requirements are not supported"):
+            await check_package_availability(
+                sess,
+                ["packaging @ https://example.invalid/packaging.whl"],
+            )
         available = await check_package_availability(
             sess,
-            ["packaging>=25", "packaging>9999", "packaging[missing-extra]"],
+            [
+                "packaging>=25",
+                "packaging>9999",
+                "packaging[missing-extra]",
+                "missing-jat-package[extra]; python_version < '1'",
+            ],
         )
         assert available == {
             "packaging>=25": True,
             "packaging>9999": False,
             "packaging[missing-extra]": False,
+            "missing-jat-package[extra]; python_version < '1'": True,
         }
     finally:
         await sess.shutdown()

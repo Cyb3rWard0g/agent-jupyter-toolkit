@@ -32,13 +32,13 @@ The domain library that provides kernel management, notebook document transports
 
 ## MCP Server (`mcp-jupyter-notebook`)
 
-A thin MCP adapter that wraps the toolkit and exposes it as 27 tools for AI agents.
+A thin MCP adapter that wraps the toolkit and exposes 43 core tools for AI agents.
 
 | Document | Description |
 |----------|-------------|
 | [Architecture](mcp-server/architecture.md) | Module layout, request lifecycle, lifespan management |
 | [Configuration](mcp-server/configuration.md) | CLI args, environment variables, transports, session modes |
-| [Tools Reference](mcp-server/tools.md) | All 27 MCP tools with parameters, return values, and examples |
+| [Tools Reference](mcp-server/tools.md) | All 43 core MCP tools with parameters, return values, and examples |
 
 ---
 
