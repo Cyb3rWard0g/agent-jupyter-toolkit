@@ -18,9 +18,11 @@ from .types import (
     HistoryResult,
     InspectResult,
     IsCompleteResult,
+    KernelDisconnectedError,
     KernelInfoResult,
     OutputCallback,
     SessionConfig,
+    SessionInfo,
 )
 
 if TYPE_CHECKING:
@@ -47,6 +49,7 @@ class Session:
 
     def __init__(self, transport: KernelTransport) -> None:
         self._transport = transport
+        self._kernel_generation = 0
 
     async def start(self) -> None:
         """
@@ -55,10 +58,17 @@ class Session:
         await self._transport.start()
 
     async def shutdown(self) -> None:
-        """
-        Shut down the underlying kernel and release resources.
+        """Release this client's resources and stop kernels it owns.
+
+        An attached local kernel or existing remote notebook session is borrowed,
+        so normal shutdown only detaches from it. Use :meth:`shutdown_kernel` when
+        the caller explicitly intends to terminate a borrowed kernel.
         """
         await self._transport.shutdown()
+
+    async def shutdown_kernel(self) -> None:
+        """Explicitly terminate the kernel, including one attached from elsewhere."""
+        await self._transport.shutdown_kernel()
 
     async def is_alive(self) -> bool:
         """Return True if the underlying kernel is responsive."""
@@ -70,7 +80,10 @@ class Session:
         *,
         timeout: float | None = None,
         output_callback: OutputCallback | None = None,
+        silent: bool = False,
         store_history: bool = True,
+        user_expressions: dict | None = None,
+        metadata: dict | None = None,
         allow_stdin: bool = False,
         stop_on_error: bool = True,
     ) -> ExecutionResult:
@@ -93,14 +106,24 @@ class Session:
         Returns:
             ExecutionResult: Normalized execution metadata and nbformat-like outputs.
         """
-        return await self._transport.execute(
-            code,
-            timeout=timeout,
-            output_callback=output_callback,
-            store_history=store_history,
-            allow_stdin=allow_stdin,
-            stop_on_error=stop_on_error,
-        )
+        try:
+            result = await self._transport.execute(
+                code,
+                timeout=timeout,
+                output_callback=output_callback,
+                silent=silent,
+                store_history=store_history,
+                user_expressions=user_expressions,
+                metadata=metadata,
+                allow_stdin=allow_stdin,
+                stop_on_error=stop_on_error,
+            )
+        except KernelDisconnectedError as exc:
+            if exc.partial_result is not None:
+                exc.partial_result.kernel_generation = self._kernel_generation
+            raise
+        result.kernel_generation = self._kernel_generation
+        return result
 
     # ── Introspection / control ──────────────────────────────────────────
 
@@ -118,6 +141,7 @@ class Session:
             RuntimeError: If the transport is not started or the restart fails.
         """
         await self._transport.restart()
+        self._kernel_generation += 1
 
     async def interrupt(self) -> None:
         """
@@ -178,6 +202,11 @@ class Session:
         raw: bool = True,
         hist_access_type: str = "tail",
         n: int = 10,
+        session: int = 0,
+        start: int = 0,
+        stop: int = 0,
+        pattern: str = "",
+        unique: bool = False,
     ) -> HistoryResult:
         """
         Retrieve execution history from the kernel.
@@ -196,6 +225,11 @@ class Session:
             raw=raw,
             hist_access_type=hist_access_type,
             n=n,
+            session=session,
+            start=start,
+            stop=stop,
+            pattern=pattern,
+            unique=unique,
         )
 
     async def kernel_info(self) -> KernelInfoResult:
@@ -207,6 +241,24 @@ class Session:
             details, and banner text.
         """
         return await self._transport.kernel_info()
+
+    def session_info(self) -> SessionInfo:
+        """Return kernel identity and resource ownership without credentials."""
+        manager = self.kernel_manager
+        return SessionInfo(
+            transport=type(self._transport).__name__,
+            kernel_id=getattr(self._transport, "kernel_id", None)
+            or (manager.kernel_id if manager else None),
+            server_session_id=getattr(self._transport, "server_session_id", None),
+            owns_kernel=bool(
+                getattr(self._transport, "owns_kernel", False) or (manager and manager.owns_kernel)
+            ),
+            owns_session=bool(getattr(self._transport, "owns_session", False)),
+            connection_file=manager.connection_file_path if manager else None,
+            kernel_generation=self._kernel_generation,
+            transport_encryption=manager.transport_encryption if manager else "disabled",
+            encryption_enabled=bool(manager and manager.encryption_enabled),
+        )
 
     @property
     def kernel_manager(self) -> KernelManager | None:
@@ -244,9 +296,26 @@ def create_session(config: SessionConfig | None = None) -> Session:
             raise ValueError("Server mode requires a ServerConfig")
         transport = ServerTransport(config.server)
     else:
+        if config.connection_file_name and (
+            config.cwd is not None
+            or config.env is not None
+            or config.kernel_args
+            or config.transport_encryption != "disabled"
+        ):
+            raise ValueError(
+                "cwd, env, kernel_args, and transport_encryption only apply when "
+                "launching a local kernel"
+            )
         transport = LocalTransport(
             kernel_name=config.kernel_name,
             connection_file_name=config.connection_file_name,
             packer=config.packer,
+            startup_timeout=config.startup_timeout,
+            cwd=config.cwd,
+            env=config.env,
+            kernel_args=config.kernel_args,
+            max_output_bytes=config.max_output_bytes,
+            transport_encryption=config.transport_encryption,
+            manager_factory=config.manager_factory,
         )
     return Session(transport)

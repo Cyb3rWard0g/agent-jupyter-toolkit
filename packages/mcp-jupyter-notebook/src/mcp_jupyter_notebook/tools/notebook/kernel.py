@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
-from .common import get_session
+from mcp_jupyter_notebook._mcp import Context, FastMCP
+
+from .common import get_manager, get_session
 
 
 def register_kernel_tools(
@@ -177,6 +178,9 @@ def register_kernel_tools(
             "implementation_version": info.implementation_version,
             "language_info": info.language_info,
             "banner": info.banner,
+            "help_links": info.help_links,
+            "supported_features": info.supported_features,
+            "raw_content": info.raw_content,
         }
 
     @mcp.tool(
@@ -195,7 +199,9 @@ def register_kernel_tools(
     ) -> dict[str, Any]:
         """Get information about the current notebook session."""
         session = get_session(ctx, notebook_path)
-        return await get_session_info_fn(session.kernel)
+        info = await get_session_info_fn(session.kernel)
+        info.update(get_manager(ctx).document_transport_info(session))
+        return info
 
     @mcp.tool(
         title="Inspect Object",

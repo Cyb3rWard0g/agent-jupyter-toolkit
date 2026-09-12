@@ -8,6 +8,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class NotebookPersistenceError(RuntimeError):
+    """Base error for an execution result that could not be persisted safely."""
+
+
+class CellDeletedError(NotebookPersistenceError):
+    """The target cell no longer exists."""
+
+
+class CellSourceChangedError(NotebookPersistenceError):
+    """The target cell source changed after execution began."""
+
+
 @dataclass
 class NotebookCodeExecutionResult:
     """
@@ -29,6 +41,16 @@ class NotebookCodeExecutionResult:
     formatted_output: str = ""
     error_message: str | None = None
     elapsed_seconds: float | None = None
+    cell_id: str | None = None
+    persistence_status: str = "not-requested"
+    persistence_error: str | None = None
+    request_id: str | None = None
+    source_hash: str | None = None
+    kernel_generation: int = 0
+    output_truncated: bool = False
+    dropped_output_bytes: int = 0
+    outcome: str = "completed"
+    timed_out: bool = False
 
 
 @dataclass
@@ -72,6 +94,16 @@ class CellRunResult:
 
     elapsed_seconds: float | None = None
     """Wall-clock time for this individual cell execution."""
+
+    persistence_status: str = "not-requested"
+    persistence_error: str | None = None
+    request_id: str | None = None
+    source_hash: str | None = None
+    kernel_generation: int = 0
+    output_truncated: bool = False
+    dropped_output_bytes: int = 0
+    outcome: str = "completed"
+    timed_out: bool = False
 
 
 @dataclass

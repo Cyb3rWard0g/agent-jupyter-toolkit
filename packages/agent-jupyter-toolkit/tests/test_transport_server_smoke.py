@@ -1,8 +1,13 @@
+import asyncio
 import os
 
 import pytest
 
-from agent_jupyter_toolkit.kernel import SessionConfig, create_session
+from agent_jupyter_toolkit.kernel import (
+    KernelDisconnectedError,
+    SessionConfig,
+    create_session,
+)
 from agent_jupyter_toolkit.kernel.transports.server import ServerConfig
 
 pytestmark = pytest.mark.asyncio
@@ -71,3 +76,63 @@ async def test_server_restart_clears_namespace_and_keeps_session_usable():
         )
     finally:
         await sess.shutdown()
+
+
+@skip_server
+async def test_notebook_session_reuse_and_borrowed_shutdown_preserves_kernel():
+    server = ServerConfig(
+        base_url=os.environ["JAT_SERVER_URL"].rstrip("/"),
+        token=os.getenv("JAT_SERVER_TOKEN"),
+        kernel_name="python3",
+        notebook_path="shared/session-ownership.ipynb",
+    )
+    owner = create_session(SessionConfig(mode="server", server=server))
+    borrower = create_session(SessionConfig(mode="server", server=server))
+    await owner.start()
+    try:
+        await owner.execute("shared_value = 41")
+        await borrower.start()
+        assert borrower.session_info().kernel_id == owner.session_info().kernel_id
+        assert borrower.session_info().owns_kernel is False
+        await borrower.shutdown()
+
+        result = await owner.execute("shared_value + 1")
+        assert result.outputs[-1]["data"]["text/plain"] == "42"
+    finally:
+        await borrower.shutdown()
+        await owner.shutdown()
+
+
+@skip_server
+async def test_server_disconnect_finishes_unlimited_execution_with_typed_error():
+    session = create_session(
+        SessionConfig(
+            mode="server",
+            server=ServerConfig(
+                base_url=os.environ["JAT_SERVER_URL"].rstrip("/"),
+                token=os.getenv("JAT_SERVER_TOKEN"),
+            ),
+        )
+    )
+    await session.start()
+    try:
+        started = asyncio.Event()
+
+        async def on_output(outputs, _execution_count):
+            if any("started" in output.get("text", "") for output in outputs):
+                started.set()
+
+        task = asyncio.create_task(
+            session.execute(
+                "import time\nprint('started', flush=True)\ntime.sleep(30)",
+                output_callback=on_output,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=3)
+        await session._transport._ws.close()
+        with pytest.raises(KernelDisconnectedError) as raised:
+            await asyncio.wait_for(task, timeout=3)
+        assert "started" in raised.value.partial_result.stdout
+        assert raised.value.partial_result.outcome == "unknown"
+    finally:
+        await session.shutdown()

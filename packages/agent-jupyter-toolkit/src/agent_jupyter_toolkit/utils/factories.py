@@ -21,6 +21,12 @@ def create_kernel(
     kernel_name: str = "python3",
     connection_file: str | None = None,
     packer: str | None = None,
+    startup_timeout: float = 60.0,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    kernel_args: list[str] | None = None,
+    max_output_bytes: int | None = 50 * 1024 * 1024,
+    transport_encryption: str = "disabled",
     # Remote options
     base_url: str | None = None,
     token: str | None = None,
@@ -62,6 +68,12 @@ def create_kernel(
                 kernel_name=kernel_name,
                 connection_file_name=connection_file,
                 packer=packer,
+                startup_timeout=startup_timeout,
+                cwd=cwd,
+                env=env,
+                kernel_args=list(kernel_args or []),
+                max_output_bytes=max_output_bytes,
+                transport_encryption=transport_encryption,
             )
         )
     elif mode == "remote":
@@ -78,6 +90,7 @@ def create_kernel(
                     headers=headers,
                     kernel_name=kernel_name,
                     notebook_path=notebook_path,
+                    max_output_bytes=max_output_bytes,
                 ),
             )
         )
@@ -96,6 +109,7 @@ def create_notebook_transport(
     headers: dict[str, str] | None = None,
     # Collaboration options
     prefer_collab: bool = False,
+    collaboration_mode: str | None = None,
     create_if_missing: bool = True,
     local_autosave_delay: float | None = None,
 ) -> NotebookDocumentTransport:
@@ -108,7 +122,8 @@ def create_notebook_transport(
         base_url: For remote mode, Jupyter server URL
         token: For remote mode, API token
         headers: For remote mode, extra HTTP headers
-        prefer_collab: Use collaborative transport if available
+        prefer_collab: Compatibility alias for preferred collaboration
+        collaboration_mode: ``required``, ``preferred``, or ``disabled``
         create_if_missing: Create notebook if it doesn't exist
         local_autosave_delay: Optional debounce delay (seconds) for local writes
 
@@ -143,6 +158,7 @@ def create_notebook_transport(
             token=None,
             headers_json=None,
             prefer_collab=False,
+            collaboration_mode="disabled",
             local_autosave_delay=local_autosave_delay,
         )
     elif mode == "remote":
@@ -165,6 +181,7 @@ def create_notebook_transport(
             token=token,
             headers_json=headers_json,
             prefer_collab=prefer_collab,
+            collaboration_mode=collaboration_mode,
             create_if_missing=create_if_missing,
             local_autosave_delay=local_autosave_delay,
         )

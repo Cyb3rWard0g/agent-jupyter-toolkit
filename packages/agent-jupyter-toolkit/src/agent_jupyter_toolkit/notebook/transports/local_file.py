@@ -14,6 +14,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -22,6 +23,7 @@ import nbformat
 from nbformat.notebooknode import NotebookNode
 
 from ..transport import NotebookDocumentTransport
+from ..types import CellDeletedError, CellSourceChangedError
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +104,11 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
         self._pending_write: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
+    @property
+    def selected_transport(self) -> str:
+        """Return the active document transport name for diagnostics."""
+        return "local-file"
+
     async def start(self) -> None:
         """
         Ensure the directory exists and create an empty notebook if absent.
@@ -134,7 +141,7 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
         """
         async with self._lock:
             nb = self._load_nb()  # NotebookNode
-            return json.loads(nbformat.writes(nb, version=4))
+            return _plain_notebook(nb)
 
     async def get_cell(self, index: int) -> dict[str, Any]:
         """Return the cell at *index* as a plain dict.
@@ -148,8 +155,7 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
             nb = self._load_nb()
             if index < 0 or index >= len(nb.cells):
                 raise IndexError(f"get_cell: index {index} out of range 0..{len(nb.cells) - 1}")
-            # JSON round-trip a single cell to plain dict
-            return json.loads(json.dumps(dict(nb.cells[index])))
+            return _normalize_multiline(json.loads(json.dumps(dict(nb.cells[index]))))
 
     async def cell_count(self) -> int:
         """Return the number of cells in the notebook."""
@@ -252,18 +258,51 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
                 raise IndexError(
                     f"update_cell_outputs: index {index} out of range 0..{len(nb.cells) - 1}"
                 )
+            if nb.cells[index].get("cell_type") != "code":
+                raise TypeError("update_cell_outputs requires a code cell")
 
-            # Coerce each output dict → NotebookNode so nbformat.write() can attribute-access
-            coerced: list[NotebookNode] = []
-            for o in outputs or []:
-                coerced.append(o if isinstance(o, NotebookNode) else nbformat.from_dict(o))  # type: ignore[arg-type]
-
-            nb.cells[index]["outputs"] = coerced
-            nb.cells[index]["execution_count"] = execution_count
-
+            _set_outputs(nb.cells[index], outputs, execution_count)
             await self._queue_write(nb)
         for cb in self._on_change:
             cb({"op": "cells-mutated", "kind": "outputs", "index": index})
+
+    async def update_cell_outputs_by_id(
+        self,
+        cell_id: str,
+        outputs: list[dict[str, Any]],
+        execution_count: int | None,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Resolve and update a cell under one file-transport lock."""
+        _validate_outputs(outputs)
+        async with self._lock:
+            nb = self._load_nb()
+            for index, cell in enumerate(nb.cells):
+                if cell.get("id") != cell_id:
+                    continue
+                matched_index = index
+                if cell.get("cell_type") != "code":
+                    raise TypeError("update_cell_outputs_by_id requires a code cell")
+                if expected_source is not None and cell.get("source") != expected_source:
+                    raise CellSourceChangedError(
+                        f"Cell {cell_id!r} source changed during execution"
+                    )
+                _set_outputs(cell, outputs, execution_count)
+                await self._queue_write(nb)
+                break
+            else:
+                raise CellDeletedError(f"Cell {cell_id!r} was deleted")
+        for cb in self._on_change:
+            cb(
+                {
+                    "op": "cells-mutated",
+                    "kind": "outputs",
+                    "index": matched_index,
+                    "cell_id": cell_id,
+                }
+            )
+        return matched_index
 
     async def update_cell_outputs_delta(
         self,
@@ -457,10 +496,11 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
 
     def _load_nb(self) -> NotebookNode:
         """Return the working notebook (dirty buffer wins)."""
-        return self._dirty_nb if self._dirty_nb is not None else self._read_nb()
+        return deepcopy(self._dirty_nb) if self._dirty_nb is not None else self._read_nb()
 
     async def _queue_write(self, nb: NotebookNode) -> None:
         """Persist immediately or debounce writes based on autosave_delay."""
+        nbformat.validate(nb)
         self._dirty_nb = nb
         if self._autosave_delay is None:
             self._atomic_write(nb)
@@ -500,14 +540,61 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
             - write to a temporary file in the same directory
             - replace the target path in a single operation
         """
+        nbformat.validate(nb)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile("w", delete=False, dir=self._path.parent, encoding="utf-8") as tf:
-            nbformat.write(nb, tf)
-            tmp_name = tf.name
-        Path(tmp_name).replace(self._path)
+        tmp_name: str | None = None
+        try:
+            with NamedTemporaryFile(
+                "w", delete=False, dir=self._path.parent, encoding="utf-8"
+            ) as tf:
+                tmp_name = tf.name
+                nbformat.write(nb, tf)
+            Path(tmp_name).replace(self._path)
+        finally:
+            if tmp_name:
+                Path(tmp_name).unlink(missing_ok=True)
 
 
 def _validate_tags(tags: list[str]) -> None:
     """Ensure tags is a list of strings (raise TypeError otherwise)."""
     if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
         raise TypeError("tags must be a list of strings")
+
+
+def _validate_outputs(outputs: list[dict[str, Any]]) -> None:
+    if not isinstance(outputs, list) or not all(
+        isinstance(output, (dict, NotebookNode)) for output in outputs
+    ):
+        raise TypeError("outputs must be a list of nbformat-like dicts")
+
+
+def _set_outputs(
+    cell: NotebookNode,
+    outputs: list[dict[str, Any]],
+    execution_count: int | None,
+) -> None:
+    _validate_outputs(outputs)
+    cell["outputs"] = [
+        output if isinstance(output, NotebookNode) else nbformat.from_dict(output)
+        for output in outputs
+    ]
+    cell["execution_count"] = execution_count
+
+
+def _normalize_multiline(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    source = value.get("source")
+    if isinstance(source, list):
+        value["source"] = "".join(str(part) for part in source)
+    if value.get("output_type") == "stream" and isinstance(value.get("text"), list):
+        value["text"] = "".join(str(part) for part in value["text"])
+    for cell in value.get("cells", []) if isinstance(value.get("cells"), list) else []:
+        _normalize_multiline(cell)
+    for output in value.get("outputs", []) if isinstance(value.get("outputs"), list) else []:
+        _normalize_multiline(output)
+    return value
+
+
+def _plain_notebook(nb: NotebookNode) -> dict[str, Any]:
+    return _normalize_multiline(json.loads(nbformat.writes(nb, version=4)))

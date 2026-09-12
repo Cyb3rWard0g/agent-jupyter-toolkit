@@ -114,7 +114,10 @@ class VariableManager:
         """
         self._validate_variable_name(name)
         code = f"import json; print(json.dumps(globals().get('{name}', None), default=str))"
-        result = await self.session.execute(code)
+        result = await self.session.execute(code, store_history=False)
+        if result.status != "ok":
+            detail = result.stderr or "variable retrieval failed"
+            raise RuntimeError(detail.strip())
         out = result.stdout.strip() if result.stdout else ""
 
         # Try to parse as JSON, else return as string
@@ -139,8 +142,13 @@ class VariableManager:
         op = "list_detailed" if detailed else "list"
         code = VARIABLE_OPS.get(self.language, op)
 
-        result = await self.session.execute(code)
-        out = result.stdout.strip() if result.stdout else "[]"
+        result = await self.session.execute(code, store_history=False)
+        if result.status != "ok":
+            detail = result.stderr or "variable listing failed"
+            raise RuntimeError(detail.strip())
+        out = result.stdout.strip() if result.stdout else ""
+        if not out:
+            raise RuntimeError("Variable listing produced no JSON output")
 
         try:
             payload = json.loads(out)
@@ -148,6 +156,6 @@ class VariableManager:
                 return [v for v in payload if isinstance(v, dict)]
             if not detailed and isinstance(payload, list):
                 return [v for v in payload if isinstance(v, str)]
-            return []
-        except (json.JSONDecodeError, ValueError):
-            return []
+            raise RuntimeError("Variable listing returned an unexpected JSON value")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError("Variable listing returned invalid JSON") from exc

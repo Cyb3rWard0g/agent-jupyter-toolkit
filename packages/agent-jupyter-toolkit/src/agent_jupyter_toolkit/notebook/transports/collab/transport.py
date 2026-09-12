@@ -28,6 +28,7 @@ import pycrdt
 from jupyter_ydoc import YNotebook
 
 from ...transport import NotebookDocumentTransport
+from ...types import CellDeletedError, CellSourceChangedError
 from ...utils import create_notebook_via_contents_api
 from .protocol import hex_preview, looks_like_yws, safe_handle_sync_message
 from .yutils import (
@@ -175,6 +176,11 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         # Bootstrap when server file content (default empty cell) is visible
         self._cells_bootstrapped: asyncio.Event = asyncio.Event()
         self._cells_bootstrap_timeout: float = 1.0
+
+    @property
+    def selected_transport(self) -> str:
+        """Return the active document transport name for diagnostics."""
+        return "collaboration"
 
     async def start(self) -> None:
         """
@@ -714,8 +720,23 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                 if to_index < 0 or to_index >= n:
                     raise IndexError(f"move_cell: to_index {to_index} out of range 0..{n - 1}")
                 if from_index != to_index:
-                    cell = cells.pop(from_index)
-                    cells.insert(to_index, cell)
+                    move = getattr(cells, "move", None)
+                    if callable(move) and from_index > to_index:
+                        move(from_index, to_index)
+                    elif callable(move):
+                        current = from_index
+                        while current < to_index:
+                            move(current + 1, current)
+                            current += 1
+                    else:
+                        current_cell = cells[from_index]
+                        plain_cell = (
+                            current_cell.to_py()
+                            if hasattr(current_cell, "to_py")
+                            else dict(current_cell)
+                        )
+                        del cells[from_index]
+                        cells.insert(to_index, self._ynb.create_ycell(plain_cell))
             await self._broadcast_update()
             await self._wait_for_sync_completion()
         self._notify(
@@ -727,6 +748,56 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                 "to": to_index,
             }
         )
+
+    async def update_cell_outputs_by_id(
+        self,
+        cell_id: str,
+        outputs: list[dict[str, Any]],
+        execution_count: int | None,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Resolve and update a collaborative cell in one transaction."""
+        if not isinstance(outputs, list) or not all(isinstance(output, dict) for output in outputs):
+            raise TypeError("update_cell_outputs_by_id: outputs must be a list of dicts")
+
+        from json import dumps, loads
+
+        sanitized = loads(dumps(outputs))
+        await self._ensure_root()
+        async with self._op_lock:
+            doc = self._doc
+            assert doc is not None
+            assert self._ynb is not None
+            with doc.transaction():
+                for index in range(self._ynb.cell_number):
+                    ycell = self._ynb.ycells[index]
+                    if ycell.get("id") != cell_id:
+                        continue
+                    cell = ycell.to_py() or {}
+                    if cell.get("cell_type") != "code":
+                        raise TypeError("update_cell_outputs_by_id requires a code cell")
+                    source = cell.get("source", "")
+                    if isinstance(source, list):
+                        source = "".join(str(part) for part in source)
+                    if expected_source is not None and source != expected_source:
+                        raise CellSourceChangedError(
+                            f"Cell {cell_id!r} source changed during execution"
+                        )
+                    cell["outputs"] = sanitized
+                    cell["execution_count"] = execution_count
+                    self._ynb.set_cell(index, cell)
+                    break
+                else:
+                    raise CellDeletedError(f"Cell {cell_id!r} was deleted")
+            await self._broadcast_update()
+            if self._pending_updates:
+                try:
+                    await asyncio.wait_for(self._wait_for_sync_completion(), timeout=1.0)
+                except TimeoutError:
+                    wslog.warning("Output update sync timeout for cell %s", cell_id)
+        self._notify({"op": "cells-mutated", "kind": "outputs", "index": index, "cell_id": cell_id})
+        return index
 
     async def _validate_cell_index(self, index: int, operation: str) -> bool:
         await self._ensure_root()

@@ -17,11 +17,11 @@ import os
 import uuid
 from typing import Any
 
-from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from agent_jupyter_toolkit.kernel.variables import VariableManager
 from agent_jupyter_toolkit.utils import ensure_packages_with_report, execute_code, invoke_code_cell
+from mcp_jupyter_notebook._mcp import Context, FastMCP
 
 log = logging.getLogger("mcp-jupyter.tools.postgresql")
 

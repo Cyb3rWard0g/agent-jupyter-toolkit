@@ -17,7 +17,8 @@ dev = [
   "ipykernel",
   "ruff>=0.14.13",
   "build",
-  "twine",
+  "twine>=7.0.0",
+  "tox>=4.30.0",
 ]
 
 # ── uv workspace ────────────────────────────────────────
@@ -32,8 +33,13 @@ agent-jupyter-toolkit = { workspace = true }
 # ── shared tool config ──────────────────────────────────
 
 [tool.pytest.ini_options]
+testpaths = [
+  "packages/agent-jupyter-toolkit/tests",
+  "packages/mcp-jupyter-notebook/tests",
+]
 python_files = ["test_*.py"]
 addopts = "-ra"
+norecursedirs = ["repos", ".venv", ".tox", "build", "dist"]
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]

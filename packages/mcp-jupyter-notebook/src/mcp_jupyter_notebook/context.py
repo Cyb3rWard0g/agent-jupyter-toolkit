@@ -216,8 +216,9 @@ class SessionManager:
             {
                 "notebook_path": path,
                 "is_default": path == self.default_path,
+                **self.document_transport_info(session),
             }
-            for path in self._sessions
+            for path, session in self._sessions.items()
         ]
 
     async def list_notebook_files(
@@ -379,6 +380,7 @@ class SessionManager:
                 token=token,
                 headers=headers,
                 kernel_name=kernel_name,
+                notebook_path=notebook_path,
             )
             doc = create_notebook_transport(
                 "remote",
@@ -387,6 +389,7 @@ class SessionManager:
                 token=token,
                 headers=headers,
                 prefer_collab=cfg.get("prefer_collab", True),
+                collaboration_mode=cfg.get("collaboration_mode"),
                 create_if_missing=True,
             )
             return NotebookSession(kernel=kernel, doc=doc)
@@ -400,6 +403,27 @@ class SessionManager:
             create_if_missing=True,
         )
         return NotebookSession(kernel=kernel, doc=doc)
+
+    @staticmethod
+    def document_transport_info(session: NotebookSession) -> dict[str, Any]:
+        """Return the selected document transport without exposing credentials."""
+        doc = session.doc
+        selected = getattr(doc, "selected_transport", None)
+        if selected is None:
+            type_name = type(doc).__name__
+            if type_name == "CollabYjsDocumentTransport":
+                selected = "collaboration"
+            elif type_name == "ContentsApiDocumentTransport":
+                selected = "contents"
+            elif type_name == "LocalFileDocumentTransport":
+                selected = "local-file"
+            else:
+                selected = type_name
+        return {
+            "document_transport": selected,
+            "collaboration_mode": getattr(doc, "collaboration_mode", "disabled"),
+            "collaboration_fallback_reason": getattr(doc, "fallback_reason", None),
+        }
 
 
 @dataclass

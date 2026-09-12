@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from mcp.server.fastmcp import Context
+from mcp_jupyter_notebook._mcp import Context
 
 
 def get_manager(ctx: Context):
@@ -33,6 +33,15 @@ def code_result(result: Any) -> dict[str, Any]:
         "formatted_output": result.formatted_output,
         "error_message": result.error_message,
         "elapsed_seconds": result.elapsed_seconds,
+        "persistence_status": getattr(result, "persistence_status", "not-requested"),
+        "persistence_error": getattr(result, "persistence_error", None),
+        "request_id": getattr(result, "request_id", None),
+        "source_hash": getattr(result, "source_hash", None),
+        "kernel_generation": getattr(result, "kernel_generation", 0),
+        "output_truncated": getattr(result, "output_truncated", False),
+        "dropped_output_bytes": getattr(result, "dropped_output_bytes", 0),
+        "outcome": getattr(result, "outcome", "completed"),
+        "timed_out": getattr(result, "timed_out", False),
     }
 
 
@@ -97,7 +106,8 @@ async def cell_id_map_for_indices(session: Any, cell_indices: set[int]) -> dict[
 async def enriched_code_result(session: Any, result: Any) -> dict[str, Any]:
     """Return a code-cell result payload enriched with the stable cell ID."""
     payload = code_result(result)
-    payload["cell_id"] = await cell_id_for_index(session, payload.get("cell_index"))
+    if payload.get("cell_id") is None:
+        payload["cell_id"] = await cell_id_for_index(session, payload.get("cell_index"))
     return payload
 
 

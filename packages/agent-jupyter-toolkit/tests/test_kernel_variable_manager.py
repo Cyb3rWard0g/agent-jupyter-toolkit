@@ -18,5 +18,10 @@ async def test_kernel_variable_manager():
         # Get variable
         value = await var_mgr.get("x")
         assert value == 123 or str(value) == "123"
+        detailed = await var_mgr.list(detailed=True)
+        x = next(item for item in detailed if item["name"] == "x")
+        assert x["type"] == ["builtins", "int"]
+        assert isinstance(x["size"], int)
+        assert "_ajt_describe_variables" not in await var_mgr.list()
     finally:
         await sess.shutdown()

@@ -14,20 +14,28 @@ Key Components:
 """
 
 from . import utils
+from .batch import execute_notebook_batch
 from .buffer import NotebookBuffer
 from .cells import create_code_cell, create_markdown_cell
-from .factory import make_document_transport
+from .factory import CollaborationMode, make_document_transport
 from .session import NotebookSession
 from .transport import NotebookDocumentTransport
+from .trust import NotebookTrustResult, inspect_notebook_trust
 from .types import (
+    CellDeletedError,
     CellRunResult,
+    CellSourceChangedError,
     NotebookCodeExecutionResult,
     NotebookMarkdownCellResult,
+    NotebookPersistenceError,
     RunAllResult,
 )
 
 __all__ = [
     "make_document_transport",
+    "CollaborationMode",
+    "execute_notebook_batch",
+    "inspect_notebook_trust",
     "NotebookDocumentTransport",
     "NotebookSession",
     "NotebookBuffer",
@@ -37,5 +45,9 @@ __all__ = [
     "NotebookMarkdownCellResult",
     "CellRunResult",
     "RunAllResult",
+    "NotebookPersistenceError",
+    "NotebookTrustResult",
+    "CellDeletedError",
+    "CellSourceChangedError",
     "utils",
 ]

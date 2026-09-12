@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
+import hashlib
+import json
 import logging
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from ..kernel import ExecutionResult
 from ..kernel import Session as KernelSession
+from ..kernel.types import KernelDisconnectedError
 from .transport import NotebookDocumentTransport
-from .types import CellRunResult, RunAllResult
+from .types import CellDeletedError, CellRunResult, CellSourceChangedError, RunAllResult
 from .utils import to_nbformat_outputs
 
 logger = logging.getLogger(__name__)
+
+
+def _output_fingerprint(output: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(output, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -56,6 +63,10 @@ class NotebookSession:
     kernel: KernelSession
     doc: NotebookDocumentTransport
     _started: bool = field(default=False, init=False, repr=False)
+    _display_targets: dict[str, dict[str, tuple[str, dict[int, str]]]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _display_generation: int | None = field(default=None, init=False, repr=False)
 
     # --------------------------------------------------------------------- lifecycle
 
@@ -69,7 +80,7 @@ class NotebookSession:
     async def start(self) -> None:
         """
         Start kernel then document transport (idempotent).
-        If `doc.start()` fails, the kernel is shut down to avoid leaks.
+        If either startup step fails, partial document and kernel resources are closed.
         """
         if self._started:
             logger.debug("NotebookSession already started, skipping")
@@ -86,9 +97,10 @@ class NotebookSession:
 
             self._started = True
             logger.debug("NotebookSession started successfully")
-        except Exception:
-            # If anything fails, ensure kernel is shut down to avoid leaks
-            self._started = False  # Make sure we reset the flag
+        except BaseException:
+            self._started = False
+            with contextlib.suppress(Exception):
+                await self.doc.stop()
             with contextlib.suppress(Exception):
                 await self.kernel.shutdown()
             raise
@@ -98,7 +110,11 @@ class NotebookSession:
         Stop document transport then kernel (idempotent, fault-tolerant).
         Always attempts to shut down the kernel, even if not fully started here.
         """
+        self._display_targets.clear()
+        self._display_generation = None
         if not self._started:
+            with contextlib.suppress(Exception):
+                await self.doc.stop()
             with contextlib.suppress(Exception):
                 await self.kernel.shutdown()
             return
@@ -115,6 +131,8 @@ class NotebookSession:
         code: str,
         cell_index: int,
         timeout: float | None = None,
+        *,
+        cell_id: str | None = None,
     ) -> ExecutionResult:
         """
         Execute code with real-time output streaming to the document.
@@ -130,128 +148,141 @@ class NotebookSession:
         Returns:
             ExecutionResult: Complete execution result
         """
-        # Accumulators for streaming updates
-        accum: list[dict[str, Any]] = []
-        exec_count: int | None = None
+        if cell_id is None:
+            cell = await self.doc.get_cell(cell_index)
+            cell_id = cell.get("id")
+        source_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        info = getattr(self.kernel, "session_info", None)
+        generation = info().kernel_generation if callable(info) else 0
+        if generation != self._display_generation:
+            self._display_targets.clear()
+            self._display_generation = generation
+        # Executing this cell replaces its prior output area, even when its
+        # source is unchanged. Old display handles must no longer target it.
+        for display_id, targets in list(self._display_targets.items()):
+            targets.pop(cell_id, None)
+            if not targets:
+                del self._display_targets[display_id]
+        persistence_error: Exception | None = None
 
-        # Fire-and-forget flush for responsiveness
-        async def _flush_full() -> None:
+        async def _persist(outputs, execution_count) -> None:
+            nonlocal persistence_error
+            if isinstance(persistence_error, (CellDeletedError, CellSourceChangedError)):
+                return
             try:
-                await self.doc.update_cell_outputs(cell_index, list(accum), exec_count)
-            except Exception as e:
-                logger.debug("Failed to flush outputs for cell %d: %s", cell_index, e)
-
-        async def _flush_delta(
-            updated_indices: set[int] | None = None, *, cleared: bool = False
-        ) -> None:
-            updater = getattr(self.doc, "update_cell_outputs_delta", None)
-            if callable(updater):
-                try:
+                updater = getattr(self.doc, "update_cell_outputs_by_id", None)
+                if cell_id and callable(updater):
                     await updater(
-                        cell_index,
-                        list(accum),
-                        exec_count,
-                        updated_indices=updated_indices,
-                        cleared=cleared,
+                        cell_id,
+                        list(outputs or []),
+                        execution_count,
+                        expected_source=code,
                     )
-                    return
-                except Exception as e:
-                    logger.debug("Failed to flush delta outputs for cell %d: %s", cell_index, e)
-            await _flush_full()
-
-        # Define streaming callbacks
-        def _on_output(out: dict[str, Any]) -> None:
-            accum.append(out)
-            idx = len(accum) - 1
-            asyncio.create_task(_flush_delta({idx}))
-
-        def _on_exec_count(n: int | None) -> None:
-            nonlocal exec_count
-            exec_count = n
-            asyncio.create_task(_flush_delta())
-
-        def _on_clear(wait: bool) -> None:
-            accum.clear()
-            asyncio.create_task(_flush_delta(set(), cleared=True))
-
-        # Execute with hooks (preferred) or legacy callback fallback
-        res: ExecutionResult | None = None
-        try:
-            if timeout is None:
-                try:
-                    res = await self.kernel.execute(
-                        code,
-                        on_output=_on_output,
-                        on_exec_count=_on_exec_count,
-                        on_clear_output=_on_clear,
-                    )
-                except TypeError:
-                    # Fallback path: kernel expects a single snapshot callback
-                    async def _legacy_cb(outputs, execution_count):
-                        nonlocal accum, exec_count
-                        accum = list(outputs or [])
-                        exec_count = execution_count
-                        await _flush_full()
-
-                    res = await self.kernel.execute(
-                        code,
-                        output_callback=_legacy_cb,  # type: ignore[arg-type]
-                    )
-            else:
-                try:
-                    res = await asyncio.wait_for(
-                        self.kernel.execute(
-                            code,
-                            on_output=_on_output,
-                            on_exec_count=_on_exec_count,
-                            on_clear_output=_on_clear,
-                        ),
-                        timeout=timeout,
-                    )
-                except TypeError:
-
-                    async def _legacy_cb(outputs, execution_count):
-                        nonlocal accum, exec_count
-                        accum = list(outputs or [])
-                        exec_count = execution_count
-                        await _flush_full()
-
-                    res = await asyncio.wait_for(
-                        self.kernel.execute(
-                            code,
-                            output_callback=_legacy_cb,  # type: ignore[arg-type]
-                        ),
-                        timeout=timeout,
-                    )
-        finally:
-            # Final authoritative write with normalized outputs
-            try:
-                if res is not None:
-                    outs = to_nbformat_outputs(res) or []
-                    final_count = getattr(res, "execution_count", None)
-                    await self.doc.update_cell_outputs(cell_index, outs, final_count)
-                    logger.debug(
-                        f"[_execute_with_streaming] Kernel execution result: {res.__dict__}"
-                    )
-                    logger.debug(f"[_execute_with_streaming] Set outputs for cell {cell_index}")
                 else:
-                    # Execution failed - use accumulated outputs
-                    await self.doc.update_cell_outputs(cell_index, list(accum), exec_count)
-                    logger.debug(
-                        f"[_execute_with_streaming] Using accumulated outputs for cell "
-                        f"{cell_index} (execution failed)"
+                    current = await self.doc.get_cell(cell_index)
+                    if current.get("source") != code:
+                        raise CellSourceChangedError(
+                            f"Cell at index {cell_index} changed during execution"
+                        )
+                    await self.doc.update_cell_outputs(
+                        cell_index,
+                        list(outputs or []),
+                        execution_count,
                     )
-            except Exception as e:
-                logger.warning(
-                    f"[_execute_with_streaming] Failed to update cell outputs for {cell_index}: {e}"
-                )
+                persistence_error = None
+            except Exception as exc:
+                persistence_error = exc
+                logger.debug("Failed to persist outputs for cell %s: %s", cell_id, exc)
 
-        # Return result or create error result for failed execution
-        return (
-            res
-            if res is not None
-            else ExecutionResult(status="error", stderr="Execution failed or timed out")
+        disconnected: KernelDisconnectedError | None = None
+        try:
+            res = await self.kernel.execute(
+                code,
+                timeout=timeout,
+                output_callback=_persist,
+                metadata={
+                    "cellId": cell_id,
+                    "agent_jupyter_toolkit": {"source_hash": source_hash},
+                },
+            )
+        except KernelDisconnectedError as exc:
+            disconnected = exc
+            res = exc.partial_result or ExecutionResult()
+            res.status = "error"
+            res.outcome = "unknown"
+            res.stderr += f"\n{exc}"
+            exc.partial_result = res
+        res.cell_id = cell_id
+        res.source_hash = source_hash
+
+        await _persist(to_nbformat_outputs(res), res.execution_count)
+        cell_persisted = persistence_error is None
+        cross_cell_error = await self._persist_cross_cell_display_updates(
+            res, current_cell_id=cell_id
         )
+        if cross_cell_error is not None and persistence_error is None:
+            persistence_error = cross_cell_error
+        if cell_id and cell_persisted:
+            for display_id, indices in res.display_ids.items():
+                self._display_targets.setdefault(display_id, {})[cell_id] = (
+                    code,
+                    {index: _output_fingerprint(res.outputs[index]) for index in indices},
+                )
+        if persistence_error is None:
+            res.persistence_status = "ok"
+        else:
+            res.persistence_status = "error"
+            res.persistence_error = f"{type(persistence_error).__name__}: {persistence_error}"
+            logger.warning(
+                "Execution finished but outputs were not persisted for cell %s: %s",
+                cell_id,
+                persistence_error,
+            )
+        if disconnected is not None:
+            raise disconnected
+        return res
+
+    async def _persist_cross_cell_display_updates(
+        self, result: ExecutionResult, *, current_cell_id: str | None
+    ) -> Exception | None:
+        persistence_error: Exception | None = None
+        for display_id, update in result.display_updates.items():
+            targets = self._display_targets.get(display_id, {})
+            for target_cell_id, (expected_source, expected_outputs) in list(targets.items()):
+                if target_cell_id == current_cell_id:
+                    continue
+                try:
+                    cell = await self.doc.get_cell_by_id(target_cell_id)
+                    outputs = list(cell.get("outputs") or [])
+                    # External clears or reruns invalidate the output positions
+                    # associated with this handle; never overwrite their replacements.
+                    if cell.get("source") != expected_source or any(
+                        index >= len(outputs) or _output_fingerprint(outputs[index]) != expected
+                        for index, expected in expected_outputs.items()
+                    ):
+                        targets.pop(target_cell_id, None)
+                        continue
+                    for index in expected_outputs:
+                        outputs[index] = {**outputs[index], **deepcopy(update)}
+                    await self.doc.update_cell_outputs_by_id(
+                        target_cell_id,
+                        outputs,
+                        cell.get("execution_count"),
+                        expected_source=expected_source,
+                    )
+                    targets[target_cell_id] = (
+                        expected_source,
+                        {index: _output_fingerprint(outputs[index]) for index in expected_outputs},
+                    )
+                except CellDeletedError:
+                    targets.pop(target_cell_id, None)
+                except Exception as exc:
+                    if persistence_error is None:
+                        persistence_error = exc
+                    logger.warning(
+                        "Failed to persist cross-cell display update %s: %s", display_id, exc
+                    )
+        return persistence_error
 
     async def is_connected(self) -> bool:
         """True if both kernel and document transports are live."""
@@ -323,10 +354,15 @@ class NotebookSession:
 
         # Create the cell first so we have a stable index to update
         idx = await self.doc.append_code_cell(code, metadata=metadata)
+        cell = await self.doc.get_cell(idx)
+        cell_id = cell.get("id")
         logger.debug(f"[append_and_run] Appended cell at index: {idx}")
 
         # Execute with streaming using the centralized helper
-        result = await self._execute_with_streaming(code, idx, timeout)
+        result = await self._execute_with_streaming(code, idx, timeout, cell_id=cell_id)
+        if cell_id:
+            with contextlib.suppress(KeyError):
+                idx = await self.doc.resolve_cell_index(cell_id)
 
         return idx, result
 
@@ -377,9 +413,16 @@ class NotebookSession:
 
         # Update the cell source first
         await self.doc.set_cell_source(index, code)
+        updated_cell = await self.doc.get_cell(index)
+        cell_id = updated_cell.get("id")
 
         # Execute with streaming using the centralized helper
-        return await self._execute_with_streaming(code, index, timeout)
+        return await self._execute_with_streaming(
+            code,
+            index,
+            timeout,
+            cell_id=cell_id,
+        )
 
     async def run_markdown(self, text: str, *, index: int | None = None) -> int:
         """
@@ -501,7 +544,12 @@ class NotebookSession:
             executed += 1
             cell_start = _time.monotonic()
             try:
-                result = await self._execute_with_streaming(source, idx, timeout)
+                result = await self._execute_with_streaming(
+                    source,
+                    idx,
+                    timeout,
+                    cell_id=cell_id,
+                )
                 elapsed = _time.monotonic() - cell_start
 
                 cr = CellRunResult(
@@ -511,17 +559,29 @@ class NotebookSession:
                     source_snippet=preview,
                     execution_count=result.execution_count,
                     elapsed_seconds=elapsed,
+                    persistence_status=result.persistence_status,
+                    persistence_error=result.persistence_error,
+                    request_id=result.request_id,
+                    source_hash=result.source_hash,
+                    kernel_generation=result.kernel_generation,
+                    output_truncated=result.output_truncated,
+                    dropped_output_bytes=result.dropped_output_bytes,
+                    outcome=result.outcome,
+                    timed_out=result.timed_out,
                 )
 
-                if result.status != "ok":
-                    cr.error_message = result.stderr or "execution error"
+                cell_failed = result.status != "ok" or result.persistence_status == "error"
+                if cell_failed:
+                    cr.error_message = (
+                        result.persistence_error or result.stderr or "execution error"
+                    )
                     overall = "error"
                     if failed is None:
                         failed = cr
 
                 cell_results.append(cr)
 
-                if result.status != "ok" and stop_on_error:
+                if cell_failed and stop_on_error:
                     break
 
             except Exception as exc:
@@ -534,6 +594,21 @@ class NotebookSession:
                     error_message=f"{type(exc).__name__}: {exc}",
                     elapsed_seconds=elapsed,
                 )
+                if isinstance(exc, KernelDisconnectedError):
+                    cr.outcome = "unknown"
+                    if exc.partial_result is not None:
+                        for name in (
+                            "persistence_status",
+                            "persistence_error",
+                            "request_id",
+                            "source_hash",
+                            "kernel_generation",
+                            "output_truncated",
+                            "dropped_output_bytes",
+                            "execution_count",
+                            "timed_out",
+                        ):
+                            setattr(cr, name, getattr(exc.partial_result, name))
                 cell_results.append(cr)
                 overall = "error"
                 if failed is None:

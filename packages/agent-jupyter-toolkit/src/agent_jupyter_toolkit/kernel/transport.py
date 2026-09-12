@@ -33,7 +33,11 @@ class KernelTransport:
         ...
 
     async def shutdown(self) -> None:
-        """Stop the kernel and teardown channels."""
+        """Tear down channels and stop any kernel owned by this client."""
+        ...
+
+    async def shutdown_kernel(self) -> None:
+        """Explicitly terminate the kernel, even when this client borrowed it."""
         ...
 
     async def is_alive(self) -> bool:
@@ -46,7 +50,10 @@ class KernelTransport:
         *,
         timeout: float | None = None,
         output_callback: OutputCallback | None = None,
+        silent: bool = False,
         store_history: bool = True,
+        user_expressions: dict | None = None,
+        metadata: dict | None = None,
         allow_stdin: bool = False,
         stop_on_error: bool = True,
     ) -> ExecutionResult:
@@ -148,6 +155,11 @@ class KernelTransport:
         raw: bool = True,
         hist_access_type: str = "tail",
         n: int = 10,
+        session: int = 0,
+        start: int = 0,
+        stop: int = 0,
+        pattern: str = "",
+        unique: bool = False,
     ) -> HistoryResult:
         """
         Retrieve execution history from the kernel.

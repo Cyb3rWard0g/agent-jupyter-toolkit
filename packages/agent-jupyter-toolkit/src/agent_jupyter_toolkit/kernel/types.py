@@ -32,6 +32,18 @@ class KernelTimeoutError(KernelError):
     pass
 
 
+class KernelDisconnectedError(KernelError):
+    """Raised when a kernel connection closes before an operation settles."""
+
+    def __init__(self, message: str, *, partial_result: ExecutionResult | None = None):
+        super().__init__(message)
+        self.partial_result = partial_result
+
+
+class UnsupportedKernelCapabilityError(KernelError):
+    """Raised when a requested kernel capability is unavailable."""
+
+
 @dataclass
 class ServerConfig:
     """
@@ -50,6 +62,9 @@ class ServerConfig:
     headers: dict[str, str] | None = None
     kernel_name: str = "python3"
     notebook_path: str | None = None
+    request_timeout: float = 30.0
+    startup_timeout: float = 60.0
+    max_output_bytes: int | None = 50 * 1024 * 1024
 
 
 @dataclass
@@ -70,7 +85,29 @@ class SessionConfig:
     kernel_name: str = "python3"
     connection_file_name: str | None = None
     packer: str | None = None
+    startup_timeout: float = 60.0
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    kernel_args: list[str] = field(default_factory=list)
+    max_output_bytes: int | None = 50 * 1024 * 1024
+    transport_encryption: str = "disabled"
+    manager_factory: Callable[..., Any] | None = None
     server: ServerConfig | None = None
+
+
+@dataclass(frozen=True)
+class SessionInfo:
+    """Non-secret identity and ownership details for a kernel connection."""
+
+    transport: str
+    kernel_id: str | None = None
+    server_session_id: str | None = None
+    owns_kernel: bool = False
+    owns_session: bool = False
+    connection_file: str | None = None
+    kernel_generation: int = 0
+    transport_encryption: str = "disabled"
+    encryption_enabled: bool = False
 
 
 @dataclass
@@ -100,6 +137,19 @@ class ExecutionResult:
     # optional extras
     user_expressions: dict[str, Any] | None = None
     elapsed_ms: float | None = None
+    request_id: str | None = None
+    cell_id: str | None = None
+    source_hash: str | None = None
+    kernel_generation: int = 0
+    persistence_status: str = "not-requested"
+    persistence_error: str | None = None
+    output_truncated: bool = False
+    dropped_output_bytes: int = 0
+    callback_snapshots_coalesced: int = 0
+    display_ids: dict[str, list[int]] = field(default_factory=dict)
+    display_updates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    outcome: str = "completed"
+    timed_out: bool = False
 
 
 @dataclass
@@ -198,6 +248,9 @@ class KernelInfoResult:
     language_info: dict[str, Any] = field(default_factory=dict)
     banner: str = ""
     status: str = "ok"
+    help_links: list[dict[str, Any]] = field(default_factory=list)
+    supported_features: list[str] = field(default_factory=list)
+    raw_content: dict[str, Any] = field(default_factory=dict)
 
 
 class VariableDescription(TypedDict):

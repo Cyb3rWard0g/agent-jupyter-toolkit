@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
+
+from mcp_jupyter_notebook._mcp import Context, FastMCP
 
 from .common import get_manager
 

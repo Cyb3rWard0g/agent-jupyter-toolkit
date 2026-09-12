@@ -141,7 +141,7 @@ def _install_cmd(pip_name: str) -> list[str]:
     # Prefer uv if available (faster, works in uv-managed venvs without pip)
     uv = shutil.which("uv")
     if uv:
-        return [uv, "pip", "install", pip_name, "--quiet"]
+        return [uv, "pip", "install", "--python", sys.executable, pip_name, "--quiet"]
     # Fall back to python -m pip
     return [sys.executable, "-m", "pip", "install", pip_name,
             "--no-warn-script-location", "--quiet"]
@@ -156,6 +156,8 @@ for pip_name in PKGS:
         "error": None,
         "pip_returncode": None,
         "pip_stderr": "",
+        "python": sys.executable,
+        "installer": None,
     }}
 
     if is_installed(pip_name):
@@ -167,6 +169,7 @@ for pip_name in PKGS:
     # Install the package
     try:
         cmd = _install_cmd(pip_name)
+        entry["installer"] = "uv" if "uv" in cmd[0].rsplit("/", 1)[-1] else "pip"
         res = subprocess.run(cmd, capture_output=True, text=True)
         entry["pip_returncode"] = res.returncode
         entry["pip_stderr"] = res.stderr or ""
@@ -282,7 +285,7 @@ def is_installed(pip_name: str) -> bool:
 def _uninstall_cmd(pip_name: str) -> list[str]:
     uv = shutil.which("uv")
     if uv:
-        return [uv, "pip", "uninstall", pip_name]
+        return [uv, "pip", "uninstall", "--python", sys.executable, pip_name]
     return [sys.executable, "-m", "pip", "uninstall", pip_name, "-y"]
 
 rep = {{}}
@@ -294,6 +297,8 @@ for pip_name in PKGS:
         "error": None,
         "pip_returncode": None,
         "pip_stderr": "",
+        "python": sys.executable,
+        "installer": None,
     }}
 
     if not is_installed(pip_name):
@@ -304,6 +309,7 @@ for pip_name in PKGS:
     entry["was_installed"] = True
     try:
         cmd = _uninstall_cmd(pip_name)
+        entry["installer"] = "uv" if "uv" in cmd[0].rsplit("/", 1)[-1] else "pip"
         res = subprocess.run(cmd, capture_output=True, text=True)
         entry["pip_returncode"] = res.returncode
         entry["pip_stderr"] = res.stderr or ""

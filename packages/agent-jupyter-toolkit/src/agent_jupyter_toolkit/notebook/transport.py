@@ -183,6 +183,32 @@ class NotebookDocumentTransport(Protocol):
         """
         ...
 
+    async def update_cell_outputs_by_id(
+        self,
+        cell_id: str,
+        outputs: list[NbCellOutput],
+        execution_count: int | None,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Replace a code cell's outputs while checking its stable identity.
+
+        Implementations SHOULD resolve and update atomically. This default
+        preserves compatibility for third-party transports, but cannot close
+        a race between the lookup and positional update.
+        """
+        from .types import CellDeletedError, CellSourceChangedError
+
+        try:
+            index = await self.resolve_cell_index(cell_id)
+            cell = await self.get_cell(index)
+        except KeyError as exc:
+            raise CellDeletedError(f"Cell {cell_id!r} was deleted") from exc
+        if expected_source is not None and cell.get("source") != expected_source:
+            raise CellSourceChangedError(f"Cell {cell_id!r} source changed during execution")
+        await self.update_cell_outputs(index, outputs, execution_count)
+        return index
+
     async def append_markdown_cell(
         self,
         source: str,

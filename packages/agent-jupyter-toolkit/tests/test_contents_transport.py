@@ -6,6 +6,7 @@ from copy import deepcopy
 
 import pytest
 
+from agent_jupyter_toolkit.notebook.buffer import NotebookBuffer
 from agent_jupyter_toolkit.notebook.transports.contents import ContentsApiDocumentTransport
 
 pytestmark = pytest.mark.asyncio
@@ -129,3 +130,17 @@ async def test_contents_move_cell_emits_consistent_event_payload():
         "from": 0,
         "to": 2,
     }
+
+
+async def test_buffer_commit_uses_revision_from_its_loaded_snapshot():
+    doc = FakeContentsTransport(exists=True)
+    await doc.start()
+    buffer = NotebookBuffer(doc)
+    await buffer.load()
+    buffer.append_markdown_cell("# staged")
+
+    doc._version += 1
+    await doc.fetch()
+
+    with pytest.raises(RuntimeError, match="modified externally"):
+        await buffer.commit()
