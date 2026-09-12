@@ -57,6 +57,7 @@ packages/agent-jupyter-toolkit/src/agent_jupyter_toolkit/
 │   ├── types.py                    # Dataclasses: NotebookCodeExecutionResult, etc.
 │   ├── transport.py                # NotebookDocumentTransport protocol
 │   ├── session.py                  # NotebookSession (kernel + document orchestration)
+│   ├── workspace.py                # NotebookWorkspace registry, defaults, and lifecycle
 │   ├── factory.py                  # make_document_transport() factory
 │   ├── buffer.py                   # NotebookBuffer (in-memory staged edits)
 │   ├── cells.py                    # create_code_cell(), create_markdown_cell()
@@ -159,6 +160,28 @@ class MyCustomTransport:
 
 assert isinstance(MyCustomTransport(), NotebookDocumentTransport)  # True
 ```
+
+## Notebook Workspace
+
+`agent_jupyter_toolkit.notebook.NotebookWorkspace` manages multiple
+`NotebookSession` objects. `NotebookWorkspaceConfig` holds Jupyter backend
+settings independently of any agent framework. The workspace owns path lookup,
+default selection, session creation, file discovery/deletion, and the concurrent
+open/close/delete/shutdown barriers.
+
+The MCP package's `context.SessionManager` is a compatibility adapter: it converts
+MCP configuration into `NotebookWorkspaceConfig` and inherits the core behavior.
+`AppContext` makes that workspace available to tools. Existing tool arguments
+remain unchanged; calls omitting `notebook_path` resolve the workspace default.
+
+This is an in-process component. A remote MCP deployment runs the workspace in
+its server environment and connects to Jupyter's APIs; clients do not install a
+separate workspace service. Python applications can use the workspace directly.
+There is one default per workspace, shared by its callers. Extraction into the
+core does not introduce per-agent isolation or persistent run scheduling.
+
+See the [workspace API](toolkit/api-reference.md#notebookworkspace-and-notebookworkspaceconfig)
+and [MCP notebook lifecycle](mcp-server/tools.md#notebook-lifecycle) for examples.
 
 ## Data Flow
 

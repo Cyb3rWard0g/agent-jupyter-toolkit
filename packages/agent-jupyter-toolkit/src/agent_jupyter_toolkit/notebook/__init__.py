@@ -7,6 +7,7 @@ abstractions, session management, cell manipulation utilities, and output handli
 
 Key Components:
 - NotebookSession: High-level notebook manipulation interface
+- NotebookWorkspace: Multi-notebook lifecycle and default selection
 - NotebookDocumentTransport: Storage/collaboration backend protocol
 - Factory functions: Automatic transport selection and configuration
 - Cell utilities: Create and manipulate notebook cells
@@ -30,6 +31,7 @@ from .types import (
     NotebookPersistenceError,
     RunAllResult,
 )
+from .workspace import NotebookWorkspace, NotebookWorkspaceConfig
 
 __all__ = [
     "make_document_transport",
@@ -38,6 +40,8 @@ __all__ = [
     "inspect_notebook_trust",
     "NotebookDocumentTransport",
     "NotebookSession",
+    "NotebookWorkspace",
+    "NotebookWorkspaceConfig",
     "NotebookBuffer",
     "create_code_cell",
     "create_markdown_cell",

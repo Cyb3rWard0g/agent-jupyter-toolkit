@@ -89,7 +89,7 @@ def process_config(args: Any) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        Configuration dictionary consumed by :func:`_build_session` and
+        Configuration dictionary consumed by the core workspace adapter and
         :func:`run_server`.
     """
     cfg: dict[str, Any] = {}

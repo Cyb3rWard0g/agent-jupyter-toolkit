@@ -19,6 +19,9 @@ A Python toolkit for building agent tools that interact with Jupyter kernels and
 
 ### Notebook
 
+- **Multi-notebook workspaces:** `NotebookWorkspace` manages open sessions and a
+  default notebook from Python. Switching defaults preserves other live sessions.
+  See the [workspace API](../../docs/toolkit/api-reference.md#notebookworkspace-and-notebookworkspaceconfig).
 - **Multiple notebook transports:**
   - **Local file transport** — filesystem-backed notebooks with thread-safe read/write
   - **Contents API transport** — Jupyter Server-managed notebooks via REST
@@ -192,6 +195,7 @@ agent_jupyter_toolkit
 │       └── server.py       # ServerTransport (HTTP+WS)
 ├── notebook/
 │   ├── session.py          # NotebookSession (kernel + document orchestration)
+│   ├── workspace.py        # Multi-notebook registry, default selection, lifecycle
 │   ├── transport.py        # NotebookDocumentTransport protocol
 │   ├── factory.py          # make_document_transport() factory
 │   ├── buffer.py           # In-memory NotebookBuffer

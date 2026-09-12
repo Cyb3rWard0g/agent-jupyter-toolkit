@@ -81,7 +81,19 @@ Ask your agent:
 
 ## Tools
 
-> Every existing tool accepts an optional `notebook_path` parameter for multi-notebook workflows. When omitted, the default notebook is used.
+> Session operations accept an optional `notebook_path`. When omitted, the
+> manager's default notebook is used. Open and close tools require a path.
+
+`notebook_open(path)` keeps an existing default; use
+`notebook_open(path, set_default=True)` to switch subsequent pathless calls.
+Explicit paths on execution tools affect only that call. Other sessions remain
+open when switching. `notebook_list` shows the current default and open notebooks.
+No session ID is required.
+
+Session management is provided by the core toolkit's `NotebookWorkspace`,
+running inside the MCP server process. Local and remote MCP connections use the
+same behavior. Callers sharing a manager share its default; independent callers
+should use explicit notebook paths when working through that shared manager.
 
 ### Notebook Lifecycle
 
@@ -161,7 +173,7 @@ Ask your agent:
 | `notebook_variable_get` | Get the value of a specific variable |
 | `notebook_variable_set` | Set a variable in the kernel's global scope |
 
-> Full tool reference with parameters and examples: [docs/tools.md](docs/tools.md)
+> Full tool reference with parameters and examples: [Tool reference](../../docs/mcp-server/tools.md)
 
 ---
 

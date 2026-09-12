@@ -29,17 +29,17 @@ def register_lifecycle_tools(mcp: FastMCP) -> None:
         ctx: Context,
         set_default: bool = False,
     ) -> dict[str, Any]:
-        """Open a notebook and create a session for it."""
+        """Open or reuse a notebook session; set_default switches subsequent pathless calls."""
         manager = get_manager(ctx)
         await ctx.info(f"Opening notebook: {notebook_path}")
         try:
             await manager.open(notebook_path)
             if set_default:
-                manager.default_path = notebook_path
+                manager.set_default(notebook_path)
             return {
                 "ok": True,
                 "notebook_path": notebook_path,
-                "is_default": notebook_path == manager.default_path,
+                "is_default": manager.is_default(notebook_path),
                 "open_notebooks": manager.paths,
             }
         except Exception as exc:

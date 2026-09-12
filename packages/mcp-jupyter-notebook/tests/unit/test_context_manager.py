@@ -1,188 +1,134 @@
-"""Concurrency tests for the MCP notebook session registry."""
+"""MCP configuration and tool routing through the core notebook workspace."""
 
-from __future__ import annotations
-
-import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mcp_jupyter_notebook.context import SessionManager
+from agent_jupyter_toolkit.notebook import NotebookWorkspace
+from agent_jupyter_toolkit.notebook.types import NotebookCodeExecutionResult
+from mcp_jupyter_notebook._mcp import FastMCP
+from mcp_jupyter_notebook.context import AppContext, SessionManager
+from mcp_jupyter_notebook.tools.notebook import register_notebook_tools
 
 
-@pytest.mark.asyncio
-async def test_concurrent_open_shares_one_started_session(tmp_path, monkeypatch):
-    path = tmp_path / "shared.ipynb"
-    path.write_text('{"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}')
+def test_missing_session_reports_mcp_recovery_tool():
     manager = SessionManager({"mode": "local"})
-    started = asyncio.Event()
-    release = asyncio.Event()
-    sessions = []
-
-    class StubSession:
-        def __init__(self):
-            self.stop_calls = 0
-
-        async def start(self):
-            started.set()
-            await release.wait()
-
-        async def stop(self):
-            self.stop_calls += 1
-
-    def build(_path):
-        session = StubSession()
-        sessions.append(session)
-        return session
-
-    monkeypatch.setattr(manager, "_build_session", build)
-    first = asyncio.create_task(manager.open(str(path)))
-    await started.wait()
-    second = asyncio.create_task(manager.open(str(path.parent / "." / path.name)))
-    await asyncio.sleep(0)
-    release.set()
-
-    first_session, second_session = await asyncio.gather(first, second)
-    assert first_session is second_session
-    assert len(sessions) == 1
-    assert len(manager) == 1
-
-    assert await manager.close(str(path)) is True
-    assert sessions[0].stop_calls == 1
+    with pytest.raises(ValueError, match="notebook_open"):
+        manager.get()
+    with pytest.raises(ValueError, match="notebook_open"):
+        manager.get("missing.ipynb")
 
 
-@pytest.mark.asyncio
-async def test_open_waits_for_close_before_starting_replacement(monkeypatch):
-    manager = SessionManager({"mode": "server"})
-    stop_started = asyncio.Event()
-    finish_stop = asyncio.Event()
-    sessions = []
+def test_mcp_configuration_builds_the_same_core_server_transports(monkeypatch):
+    import agent_jupyter_toolkit.utils as utils
 
-    class StubSession:
-        def __init__(self):
-            self.alive = False
-
-        async def start(self):
-            self.alive = True
-
-        async def stop(self):
-            stop_started.set()
-            await finish_stop.wait()
-            self.alive = False
-
-    def build(_path):
-        session = StubSession()
-        sessions.append(session)
-        return session
-
-    monkeypatch.setattr(manager, "_build_session", build)
-    original = await manager.open("race.ipynb")
-    closing = asyncio.create_task(manager.close("race.ipynb"))
-    await stop_started.wait()
-    reopening = asyncio.create_task(manager.open("race.ipynb"))
-    await asyncio.sleep(0)
-
-    assert not reopening.done()
-    assert len(sessions) == 1
-
-    finish_stop.set()
-    assert await closing is True
-    replacement = await reopening
-    assert replacement is not original
-    assert replacement.alive is True
-    assert original.alive is False
-    assert len(sessions) == 2
-    assert manager.get("race.ipynb") is replacement
+    create_kernel = MagicMock()
+    create_document = MagicMock()
+    monkeypatch.setattr(utils, "create_kernel", create_kernel)
+    monkeypatch.setattr(utils, "create_notebook_transport", create_document)
+    headers = {"X-Test": "original"}
+    manager = SessionManager(
+        {
+            "mode": "server",
+            "base_url": "https://jupyter.example.test",
+            "token": "test-token",
+            "headers": headers,
+            "kernel_name": "custom-python",
+            "prefer_collab": False,
+            "collaboration_mode": "required",
+            "transport": "streamable-http",
+            "port": 8123,
+        }
+    )
+    headers["X-Test"] = "changed after construction"
+    session = manager._build_session("analysis.ipynb")
+    assert isinstance(manager, NotebookWorkspace)
+    create_kernel.assert_called_once_with(
+        "remote",
+        base_url="https://jupyter.example.test",
+        token="test-token",
+        headers={"X-Test": "original"},
+        kernel_name="custom-python",
+        notebook_path="analysis.ipynb",
+    )
+    create_document.assert_called_once_with(
+        "remote",
+        "analysis.ipynb",
+        base_url="https://jupyter.example.test",
+        token="test-token",
+        headers={"X-Test": "original"},
+        prefer_collab=False,
+        collaboration_mode="required",
+        create_if_missing=True,
+    )
+    assert session.kernel is create_kernel.return_value
+    assert session.doc is create_document.return_value
 
 
 @pytest.mark.asyncio
-async def test_open_waits_until_delete_finishes(monkeypatch):
-    manager = SessionManager({"mode": "server"})
-    stop_started = asyncio.Event()
-    finish_stop = asyncio.Event()
-    delete_started = asyncio.Event()
-    finish_delete = asyncio.Event()
-    sessions = []
+@pytest.mark.parametrize("mode", ["local", "server"])
+async def test_mcp_open_switch_run_and_close_use_core_default_without_ids(
+    mode, tmp_path, monkeypatch
+):
+    import mcp_jupyter_notebook.tools.notebook as notebook_tools
 
-    class StubSession:
-        async def start(self):
-            pass
+    monkeypatch.chdir(tmp_path)
+    manager = SessionManager({"mode": mode})
+    monkeypatch.setattr(
+        manager,
+        "_build_session",
+        lambda path: SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), doc=SimpleNamespace()),
+    )
+    invoke = AsyncMock(return_value=NotebookCodeExecutionResult(cell_id="cell-1"))
+    monkeypatch.setattr(notebook_tools, "invoke_code_cell", invoke)
+    server = FastMCP("workspace-routing-test")
+    register_notebook_tools(server)
+    tools = server._tool_manager._tools
+    ctx = SimpleNamespace(
+        request_context=SimpleNamespace(lifespan_context=AppContext(manager)), info=AsyncMock()
+    )
+    analysis_alias = "./analysis.ipynb" if mode == "local" else "/analysis.ipynb/"
+    report_alias = "./report.ipynb" if mode == "local" else "/report.ipynb/"
 
-        async def stop(self):
-            stop_started.set()
-            await finish_stop.wait()
+    async with manager:
+        first = await tools["notebook_open"].fn(notebook_path=analysis_alias, ctx=ctx)
+        assert first["ok"] is True
+        assert first["is_default"] is True
+        assert first["notebook_path"] == analysis_alias
+        analysis = manager.get()
 
-    def build(_path):
-        session = StubSession()
-        sessions.append(session)
-        return session
+        opened = await tools["notebook_open"].fn(notebook_path="report.ipynb", ctx=ctx)
+        assert opened["ok"] is True
+        assert opened["is_default"] is False
+        report = manager.get("report.ipynb")
 
-    async def delete_file(_path):
-        delete_started.set()
-        await finish_delete.wait()
-        return True
+        await tools["notebook_code_run"].fn(code="x = 10", ctx=ctx)
+        invoke.assert_awaited_with(analysis, "x = 10", timeout=120.0)
+        await tools["notebook_code_run"].fn(code="x = 99", notebook_path=report_alias, ctx=ctx)
+        invoke.assert_awaited_with(report, "x = 99", timeout=120.0)
+        assert manager.get() is analysis
 
-    monkeypatch.setattr(manager, "_build_session", build)
-    monkeypatch.setattr(manager, "_delete_server_file", delete_file)
-    await manager.open("delete-race.ipynb")
-    deleting = asyncio.create_task(manager.delete("delete-race.ipynb"))
-    await stop_started.wait()
-    reopening = asyncio.create_task(manager.open("delete-race.ipynb"))
+        switched = await tools["notebook_open"].fn(
+            notebook_path=report_alias, set_default=True, ctx=ctx
+        )
+        assert switched["ok"] is True
+        assert switched["is_default"] is True
+        assert ctx.request_context.lifespan_context.session is report
+        await tools["notebook_code_run"].fn(code="print(x)", ctx=ctx)
+        invoke.assert_awaited_with(report, "print(x)", timeout=120.0)
 
-    finish_stop.set()
-    await delete_started.wait()
-    await asyncio.sleep(0)
-    assert not reopening.done()
-    assert len(sessions) == 1
+        listed = await tools["notebook_list"].fn(ctx=ctx)
+        assert listed["default_notebook"] == manager.default_path
+        assert [entry["is_default"] for entry in listed["notebooks"]] == [False, True]
+        analysis.stop.assert_not_awaited()
+        report.start.assert_awaited_once()
 
-    finish_delete.set()
-    assert await deleting is True
-    replacement = await reopening
-    assert len(sessions) == 2
-    assert manager.get("delete-race.ipynb") is replacement
+        closed = await tools["notebook_close"].fn(notebook_path=report_alias, ctx=ctx)
+        assert closed["ok"] is True
+        assert manager.get() is analysis
+        report.stop.assert_awaited_once()
+        await tools["notebook_code_run"].fn(code="print(x)", ctx=ctx)
+        invoke.assert_awaited_with(analysis, "print(x)", timeout=120.0)
 
-
-@pytest.mark.asyncio
-async def test_close_all_rejects_reopen_waiting_on_teardown(monkeypatch):
-    manager = SessionManager({"mode": "server"})
-    stop_started = asyncio.Event()
-    finish_stop = asyncio.Event()
-    sessions = []
-
-    class StubSession:
-        def __init__(self):
-            self.alive = False
-
-        async def start(self):
-            self.alive = True
-
-        async def stop(self):
-            stop_started.set()
-            await finish_stop.wait()
-            self.alive = False
-
-    def build(_path):
-        session = StubSession()
-        sessions.append(session)
-        return session
-
-    monkeypatch.setattr(manager, "_build_session", build)
-    original = await manager.open("shutdown-race.ipynb")
-    closing = asyncio.create_task(manager.close("shutdown-race.ipynb"))
-    await stop_started.wait()
-
-    reopening = asyncio.create_task(manager.open("shutdown-race.ipynb"))
-    await asyncio.sleep(0)
-    shutdown = asyncio.create_task(manager.close_all())
-    await asyncio.sleep(0)
-    finish_stop.set()
-
-    assert await closing is True
-    await shutdown
-    with pytest.raises(RuntimeError, match="shutting down"):
-        await reopening
-
-    assert original.alive is False
-    assert len(sessions) == 1
-    assert len(manager) == 0
-    with pytest.raises(RuntimeError, match="shutting down"):
-        await manager.open("after-shutdown.ipynb")
+    analysis.stop.assert_awaited_once()

@@ -2,7 +2,7 @@
 
 The MCP Jupyter Notebook server exposes **43 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** for database exploration and query→DataFrame workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
 
-> **Multi-notebook support:** Every tool accepts an optional `notebook_path` parameter. When omitted, the tool targets the default notebook (backward compatible with single-notebook setups).
+> **Multi-notebook support:** Tools operating on a session accept an optional `notebook_path`. When omitted, they target the manager's default notebook. Lifecycle tools such as opening and closing require an explicit path.
 
 > **PostgreSQL tools:** Enable with `MCP_JUPYTER_ENABLE_TOOLS=postgresql` or `--enable-tools postgresql`. See [Configuration](configuration.md) for details.
 
@@ -34,11 +34,38 @@ Open a notebook and create a session for it. If the notebook is already open the
 
 **Example prompt:** *"Open analysis.ipynb"*
 
+Opening another notebook leaves an existing default selected unless
+`set_default=true`. Switching the default reuses the selected notebook session
+and keeps other sessions open. Explicitly passing `notebook_path` to an execution
+tool targets that notebook for that call without changing the default.
+
+For example, these simplified tool calls need no session ID:
+
+```python
+notebook_open(notebook_path="analysis.ipynb", set_default=True)
+notebook_code_run(code="x = 10")
+notebook_open(notebook_path="report.ipynb")  # Analysis is still default.
+notebook_code_run(notebook_path="report.ipynb", code="x = 99")
+notebook_open(notebook_path="report.ipynb", set_default=True)
+notebook_code_run(code="print(x)")  # Report's kernel prints 99.
+notebook_open(notebook_path="analysis.ipynb", set_default=True)
+notebook_code_run(code="print(x)")  # Analysis's kernel still holds 10.
+```
+
+`notebook_list` reports the current default and all open notebooks. Defaults
+belong to the server's manager, not to a model's conversation. Callers sharing
+that manager share the default; use explicit paths when their work overlaps.
+Local relative paths and their absolute equivalents select the same session.
+
 ---
 
 ### `notebook_close`
 
-Close a notebook session and release its resources. Shuts down the kernel and disconnects the document transport.
+Close a notebook session and release its resources. Stops owned kernels,
+detaches from borrowed kernels, and disconnects the document transport. The
+notebook file remains. Closing the default selects the first remaining open
+notebook, or clears the default when none remain. Live variables are lost when
+their kernel stops; the notebook file does not preserve its entire Python state.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|

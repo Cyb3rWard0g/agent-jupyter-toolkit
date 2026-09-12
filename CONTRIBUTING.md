@@ -78,6 +78,10 @@ and format checks. Server tests skip unless `JAT_SERVER_URL` and
 `JAT_COLLAB_URL` and `JAT_COLLAB_TOKEN` and require its collaboration extension.
 Use an isolated server root because these tests create notebooks and kernels.
 
+The MCP tox environment installs the toolkit as a local package dependency.
+After changing toolkit code, use `uv run tox -r -e mcp` to rebuild that environment
+so it tests the current toolkit instead of a previously installed build.
+
 After the checks pass, review `git diff` and `git diff --check`, stage the files
 for one coherent change, and inspect `git diff --cached` before committing.
 Use a concise commit subject describing the behavior changed; explain the reason

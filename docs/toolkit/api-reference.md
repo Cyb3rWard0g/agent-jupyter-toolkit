@@ -394,6 +394,70 @@ Implementations: `LocalFileDocumentTransport`, `ContentsApiDocumentTransport`,
 
 ---
 
+### `NotebookWorkspace` and `NotebookWorkspaceConfig`
+
+Manage multiple open notebook sessions directly from Python, independently of
+MCP. The workspace creates sessions, resolves paths, remembers one default,
+and coordinates concurrent open, close, delete, and shutdown operations.
+
+```python
+from agent_jupyter_toolkit.notebook import NotebookWorkspace, NotebookWorkspaceConfig
+
+async with NotebookWorkspace(NotebookWorkspaceConfig(mode="local")) as workspace:
+    analysis = await workspace.open("analysis.ipynb")  # First open becomes default.
+    await workspace.get().append_and_run("x = 10")
+
+    report = await workspace.open("report.ipynb")     # Default stays analysis.
+    workspace.set_default("./report.ipynb")
+    await workspace.get().append_and_run("x = 99")
+
+    workspace.set_default("analysis.ipynb")           # Reuse its running kernel.
+    await workspace.get().append_and_run("print(x)")  # Prints 10.
+```
+
+`NotebookWorkspace(config=None, default_path=None)` defaults to local Python
+kernels. If `default_path` is supplied, context entry opens it. Context exit
+closes all sessions, including when the body raises. Outside an async context,
+call `await workspace.close_all()` in a `finally` block. Shutdown is terminal;
+create another workspace to start again. Use workspace lifecycle methods to
+close managed sessions.
+
+`NotebookWorkspaceConfig` accepts `mode` (`"local"` or `"server"`), `kernel_name`
+(`"python3"`), `base_url`, `token`, `headers`, `prefer_collab` (`True`), and
+`collaboration_mode` (`None`, or `"required"`, `"preferred"`, `"disabled"`). Server
+mode requires a Jupyter `base_url` when opening, listing files, or deleting files.
+These settings describe the Jupyter backend, independently of any MCP transport.
+
+| Operation | Behavior |
+|---|---|
+| `await open(path)` | Open or reuse a session; the first open becomes default if none is selected |
+| `get(path=None)` | Get an open session; omitted path uses the default; explicit lookup does not switch it |
+| `set_default(path)` | Select an already open notebook; raises if it is absent or the workspace is shutting down |
+| `is_default(path)` | Compare a path with the default using the same normalization as lookup |
+| `default_path`, `paths`, `len(workspace)` | Read the default, open paths, and session count |
+| `list_sessions()` | Summarize open notebooks, their default status, and document transports |
+| `await list_notebook_files(directory=".", recursive=False)` | Discover notebook files through the filesystem or Jupyter Contents API |
+| `await close(path)` | Remove and stop a session; if it was default, select the first remaining open notebook |
+| `await delete(path)` | Close a session and delete its notebook file |
+| `await close_all()` | Reject new opens and close the workspace's sessions |
+
+Local paths resolve against the process working directory and become absolute;
+server paths have leading/trailing slashes removed. Setting `default_path`
+directly also normalizes it, but permits preselection before opening. Prefer
+`set_default()` when changing between live sessions.
+
+Switching the default does not restart or close either kernel. Closing detaches
+from borrowed kernels and stops owned kernels; the notebook file remains unless
+`delete()` is used. Variables live in kernels and are not restored by reopening
+a saved notebook.
+
+There is one default per workspace, shared by all its callers. This API does
+not provide per-agent authorization, workflow scopes, durable run tracking, or
+kernel quotas. Different workspaces have independent registries; they can still
+attach to the same external Jupyter kernel when configured for the same notebook.
+
+---
+
 ### `NotebookSession`
 
 ```python
