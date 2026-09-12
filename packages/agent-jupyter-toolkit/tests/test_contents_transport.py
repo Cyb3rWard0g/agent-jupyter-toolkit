@@ -132,6 +132,29 @@ async def test_contents_move_cell_emits_consistent_event_payload():
     }
 
 
+async def test_contents_metadata_mutations_persist():
+    doc = FakeContentsTransport(exists=True)
+    doc._content["metadata"] = {
+        "existing": "keep",
+        "agent_dependencies": {"base": {"version": "1"}},
+    }
+    await doc.start()
+
+    await doc.update_metadata({"new": {"enabled": True}})
+    await doc.update_metadata_map(
+        "agent_dependencies",
+        {"numpy": {"version": "2"}},
+        removals=["base"],
+    )
+
+    metadata = await doc.get_metadata()
+    assert metadata == {
+        "existing": "keep",
+        "new": {"enabled": True},
+        "agent_dependencies": {"numpy": {"version": "2"}},
+    }
+
+
 async def test_buffer_commit_uses_revision_from_its_loaded_snapshot():
     doc = FakeContentsTransport(exists=True)
     await doc.start()

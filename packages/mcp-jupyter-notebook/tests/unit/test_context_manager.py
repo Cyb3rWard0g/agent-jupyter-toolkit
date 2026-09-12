@@ -139,3 +139,50 @@ async def test_open_waits_until_delete_finishes(monkeypatch):
     replacement = await reopening
     assert len(sessions) == 2
     assert manager.get("delete-race.ipynb") is replacement
+
+
+@pytest.mark.asyncio
+async def test_close_all_rejects_reopen_waiting_on_teardown(monkeypatch):
+    manager = SessionManager({"mode": "server"})
+    stop_started = asyncio.Event()
+    finish_stop = asyncio.Event()
+    sessions = []
+
+    class StubSession:
+        def __init__(self):
+            self.alive = False
+
+        async def start(self):
+            self.alive = True
+
+        async def stop(self):
+            stop_started.set()
+            await finish_stop.wait()
+            self.alive = False
+
+    def build(_path):
+        session = StubSession()
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(manager, "_build_session", build)
+    original = await manager.open("shutdown-race.ipynb")
+    closing = asyncio.create_task(manager.close("shutdown-race.ipynb"))
+    await stop_started.wait()
+
+    reopening = asyncio.create_task(manager.open("shutdown-race.ipynb"))
+    await asyncio.sleep(0)
+    shutdown = asyncio.create_task(manager.close_all())
+    await asyncio.sleep(0)
+    finish_stop.set()
+
+    assert await closing is True
+    await shutdown
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await reopening
+
+    assert original.alive is False
+    assert len(sessions) == 1
+    assert len(manager) == 0
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await manager.open("after-shutdown.ipynb")

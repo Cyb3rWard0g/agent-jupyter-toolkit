@@ -859,17 +859,17 @@ class NotebookSession:
         versions = await get_package_versions(self.kernel, packages, timeout=timeout)
         now = datetime.now(UTC).isoformat()
 
-        existing = await self.get_tracked_dependencies()
+        updates: dict[str, Any] = {}
         for requirement in packages:
             parsed = Requirement(requirement)
             package_name = canonicalize_name(parsed.name)
-            existing[package_name] = {
+            updates[package_name] = {
                 "version": versions.get(requirement),
                 "requirement": str(parsed),
                 "installed_at": now,
             }
 
-        await self.doc.update_metadata({self.DEPS_META_KEY: existing})
+        await self.doc.update_metadata_map(self.DEPS_META_KEY, updates)
         logger.info(
             "Tracked %d dependencies in notebook metadata: %s",
             len(packages),
@@ -885,15 +885,14 @@ class NotebookSession:
         requested_names = {
             canonicalize_name(Requirement(requirement).name) for requirement in packages
         }
-        changed = False
+        removals: list[str] = []
         for key in list(existing):
             try:
                 stored_name = canonicalize_name(Requirement(key).name)
             except InvalidRequirement:
                 stored_name = canonicalize_name(key)
             if stored_name in requested_names:
-                del existing[key]
-                changed = True
-        if changed:
-            await self.doc.update_metadata({self.DEPS_META_KEY: existing})
+                removals.append(key)
+        if removals:
+            await self.doc.update_metadata_map(self.DEPS_META_KEY, {}, removals=removals)
             logger.info("Untracked packages from notebook metadata: %s", packages)

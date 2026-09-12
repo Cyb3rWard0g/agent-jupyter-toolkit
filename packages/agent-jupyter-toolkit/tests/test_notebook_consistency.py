@@ -238,6 +238,61 @@ async def test_collaborative_metadata_updates_persist_and_merge_by_key(monkeypat
         transport._broadcast_update.assert_awaited_once()
 
 
+async def test_collaborative_dependency_entries_merge_across_clients(monkeypatch):
+    doc_a = pycrdt.Doc()
+    notebook_a = YNotebook(doc_a)
+    notebook_a.set(
+        nbformat.v4.new_notebook(metadata={"agent_dependencies": {"base": {"version": "1"}}})
+    )
+    doc_b = pycrdt.Doc()
+    doc_b.apply_update(doc_a.get_update())
+    notebook_b = YNotebook(doc_b)
+    state_a = doc_a.get_state()
+    state_b = doc_b.get_state()
+
+    transports = []
+    for doc, notebook in ((doc_a, notebook_a), (doc_b, notebook_b)):
+        transport = CollabYjsDocumentTransport("http://unused", "dependencies.ipynb")
+        transport._doc = doc
+        transport._ynb = notebook
+        transport._cells = notebook.ycells
+        transport._initial_sync_done.set()
+        monkeypatch.setattr(transport, "_broadcast_update", AsyncMock())
+        transports.append(transport)
+
+    async def package_versions(_kernel, packages, *, timeout):
+        del timeout
+        return {packages[0]: "2" if packages[0] == "numpy" else "3"}
+
+    monkeypatch.setattr(
+        "agent_jupyter_toolkit.utils.packages.get_package_versions",
+        package_versions,
+    )
+    sessions = [
+        NotebookSession(kernel=SimpleNamespace(), doc=transports[0]),
+        NotebookSession(kernel=SimpleNamespace(), doc=transports[1]),
+    ]
+
+    await asyncio.gather(
+        sessions[0]._track_dependencies(["numpy"]),
+        sessions[1]._track_dependencies(["pandas"]),
+    )
+
+    update_a = doc_a.get_update(state_a)
+    update_b = doc_b.get_update(state_b)
+    doc_a.apply_update(update_b)
+    doc_b.apply_update(update_a)
+    await asyncio.gather(
+        transports[0]._sync_metadata_map_snapshots(),
+        transports[1]._sync_metadata_map_snapshots(),
+    )
+
+    for session, notebook in zip(sessions, (notebook_a, notebook_b), strict=True):
+        dependencies = await session.get_tracked_dependencies()
+        assert set(dependencies) == {"base", "numpy", "pandas"}
+        assert notebook.source["metadata"]["agent_dependencies"] == dependencies
+
+
 async def test_collaborative_placeholder_cleanup_preserves_meaningful_blank_cell(monkeypatch):
     transport = CollabYjsDocumentTransport("http://unused", "blank.ipynb")
     doc = pycrdt.Doc()

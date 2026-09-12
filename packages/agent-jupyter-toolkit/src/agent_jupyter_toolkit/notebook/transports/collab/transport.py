@@ -22,7 +22,7 @@ import json
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import aiohttp
 import pycrdt
@@ -114,6 +114,8 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         The notebook will be created automatically if `create_if_missing=True` and
         it doesn't exist on the server.
     """
+
+    _METADATA_MAP_ROOT_PREFIX = "agent-jupyter-toolkit:metadata-map:"
 
     def __init__(
         self,
@@ -311,6 +313,7 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
 
         # Ensure root schema
         await self._ensure_root()
+        await self._sync_metadata_map_snapshots()
         await self._broadcast_update()
         self._log_cells_snapshot("post-ensure-root")
 
@@ -470,7 +473,10 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
 
         with doc.transaction():
             # exact nbformat-like dict from jupyter_ydoc
-            return self._ynb.source
+            source = self._ynb.source
+            metadata = source.get("metadata") or {}
+            source["metadata"] = self._overlay_metadata_maps(metadata)
+            return source
 
     async def get_metadata(self) -> dict[str, Any]:
         """Return an isolated copy of the shared notebook metadata."""
@@ -481,7 +487,7 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
         with doc.transaction():
             metadata = self._ynb._ymeta.get("metadata")
             value = metadata.to_py() if hasattr(metadata, "to_py") else metadata
-            return json.loads(json.dumps(value or {}))
+            return self._overlay_metadata_maps(value or {})
 
     async def update_metadata(self, updates: dict[str, Any]) -> None:
         """Shallow-merge notebook metadata as individual shared-map updates."""
@@ -503,9 +509,127 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                     metadata = pycrdt.Map()
                     self._ynb._ymeta["metadata"] = metadata
                 for key, value in sanitized.items():
-                    metadata[key] = value
+                    root_name = self._metadata_map_root_name(key)
+                    if root_name not in doc.keys():
+                        metadata[key] = value
+                        continue
+                    if not isinstance(value, dict):
+                        raise TypeError(f"Notebook metadata {key!r} is managed as a mapping")
+                    shared = doc.get(root_name, type=pycrdt.Map)
+                    for entry in list(shared.keys()):
+                        if entry not in value:
+                            del shared[entry]
+                    for entry, entry_value in value.items():
+                        shared[entry] = entry_value
+                    metadata[key] = shared.to_py()
             await self._broadcast_update()
         self._notify({"op": "metadata-updated", "keys": list(sanitized)})
+
+    async def update_metadata_map(
+        self,
+        key: str,
+        updates: dict[str, Any],
+        *,
+        removals: list[str] | None = None,
+    ) -> None:
+        """Merge entries in a stable shared map and mirror it to notebook metadata."""
+        if not isinstance(key, str):
+            raise TypeError("update_metadata_map: 'key' must be a string")
+        if not isinstance(updates, dict):
+            raise TypeError("update_metadata_map: 'updates' must be a dict")
+        try:
+            sanitized = json.loads(json.dumps(updates, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("update_metadata_map: values must be JSON-compatible") from exc
+
+        removed = list(removals or [])
+        if not all(isinstance(entry, str) for entry in removed):
+            raise TypeError("update_metadata_map: 'removals' must contain only strings")
+
+        await self._ensure_root()
+        async with self._op_lock:
+            doc = self._doc
+            assert doc is not None
+            assert self._ynb is not None
+            root_name = self._metadata_map_root_name(key)
+            with doc.transaction():
+                metadata = self._ynb._ymeta.get("metadata")
+                if not isinstance(metadata, pycrdt.Map):
+                    metadata = pycrdt.Map()
+                    self._ynb._ymeta["metadata"] = metadata
+
+                root_exists = root_name in doc.keys()
+                shared = doc.get(root_name, type=pycrdt.Map)
+                if not root_exists:
+                    current = metadata.get(key)
+                    current = current.to_py() if hasattr(current, "to_py") else current
+                    if current is not None and not isinstance(current, dict):
+                        raise TypeError(f"Notebook metadata {key!r} is not a mapping")
+                    for entry, value in (current or {}).items():
+                        shared[entry] = value
+
+                for entry in removed:
+                    if entry in shared:
+                        del shared[entry]
+                for entry, value in sanitized.items():
+                    shared[entry] = value
+
+                # YNotebook serializes only its notebook metadata. Keep a
+                # snapshot there while the named root provides stable CRDT
+                # identity for concurrent entry-level updates.
+                metadata[key] = shared.to_py()
+            await self._broadcast_update()
+        self._notify({"op": "metadata-map-updated", "key": key, "keys": list(sanitized)})
+
+    def _metadata_map_root_name(self, key: str) -> str:
+        """Return the deterministic YDoc root name for a metadata map."""
+        return f"{self._METADATA_MAP_ROOT_PREFIX}{quote(key, safe='')}"
+
+    def _overlay_metadata_maps(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Overlay canonical shared-map values on a metadata snapshot."""
+        doc = self._doc
+        assert doc is not None
+        result = json.loads(json.dumps(metadata))
+        for root_name in doc.keys():
+            if not root_name.startswith(self._METADATA_MAP_ROOT_PREFIX):
+                continue
+            key = unquote(root_name.removeprefix(self._METADATA_MAP_ROOT_PREFIX))
+            result[key] = doc.get(root_name, type=pycrdt.Map).to_py()
+        return result
+
+    def _sync_metadata_map_snapshots_in_transaction(self) -> bool:
+        """Mirror named shared maps into metadata; caller owns a transaction."""
+        doc = self._doc
+        assert doc is not None
+        assert self._ynb is not None
+        metadata = self._ynb._ymeta.get("metadata")
+        if not isinstance(metadata, pycrdt.Map):
+            metadata = pycrdt.Map()
+            self._ynb._ymeta["metadata"] = metadata
+
+        changed = False
+        for root_name in doc.keys():
+            if not root_name.startswith(self._METADATA_MAP_ROOT_PREFIX):
+                continue
+            key = unquote(root_name.removeprefix(self._METADATA_MAP_ROOT_PREFIX))
+            value = doc.get(root_name, type=pycrdt.Map).to_py()
+            current = metadata.get(key)
+            current = current.to_py() if hasattr(current, "to_py") else current
+            if current != value:
+                metadata[key] = value
+                changed = True
+        return changed
+
+    async def _sync_metadata_map_snapshots(self) -> None:
+        """Persist converged named metadata maps in YNotebook metadata."""
+        async with self._op_lock:
+            doc = self._doc
+            if doc is None or self._ynb is None:
+                return
+            with doc.transaction():
+                changed = self._sync_metadata_map_snapshots_in_transaction()
+            if changed:
+                await self._broadcast_update()
 
     async def get_cell(self, index: int) -> dict[str, Any]:
         """Return the cell at *index* directly from the Yjs CRDT.
@@ -1337,6 +1461,19 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                                         )
                             except Exception:
                                 pass
+
+                        # A named metadata map may have gained concurrent
+                        # entries. Refresh its notebook-metadata snapshot so
+                        # Jupyter's normal .ipynb persistence sees the same
+                        # converged value returned by this transport.
+                        if self._ynb is not None:
+                            try:
+                                await self._sync_metadata_map_snapshots()
+                            except Exception as exc:
+                                wslog.warning(
+                                    "Could not persist converged metadata maps: %s",
+                                    exc,
+                                )
                     else:
                         decode_failures += 1
                         lvl = wslog.warning if decode_failures == 1 else wslog.debug

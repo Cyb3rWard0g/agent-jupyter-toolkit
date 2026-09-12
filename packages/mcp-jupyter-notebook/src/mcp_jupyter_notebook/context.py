@@ -48,6 +48,7 @@ class SessionManager:
         self._closing: dict[str, asyncio.Task[None]] = {}
         self._deleting: dict[str, asyncio.Task[bool]] = {}
         self._registry_lock = asyncio.Lock()
+        self._shutting_down = False
         self.default_path: str | None = (
             self._session_key(default_path) if default_path is not None else None
         )
@@ -89,6 +90,10 @@ class SessionManager:
         path = self._session_key(path)
         while True:
             async with self._registry_lock:
+                if self._shutting_down:
+                    raise RuntimeError(
+                        "Session manager is shutting down; new sessions cannot be opened"
+                    )
                 teardown = self._deleting.get(path) or self._closing.get(path)
                 if teardown is None:
                     existing = self._sessions.get(path)
@@ -182,9 +187,14 @@ class SessionManager:
 
     async def close_all(self) -> None:
         """Close every open session.  Used during server shutdown."""
-        paths = list(
-            dict.fromkeys([*self._sessions, *self._opening, *self._closing, *self._deleting])
-        )
+        async with self._registry_lock:
+            # This is a terminal lifecycle transition. Establish the gate and
+            # take the operation snapshot under the same lock so an open
+            # cannot slip between them and survive server shutdown.
+            self._shutting_down = True
+            paths = list(
+                dict.fromkeys([*self._sessions, *self._opening, *self._closing, *self._deleting])
+            )
         for p in paths:
             await self.close(p)
         async with self._registry_lock:

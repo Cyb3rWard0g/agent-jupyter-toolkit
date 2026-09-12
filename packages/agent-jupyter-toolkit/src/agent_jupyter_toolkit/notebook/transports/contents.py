@@ -536,6 +536,73 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
                 return cell
         raise KeyError(f"No cell with id {cell_id!r}")
 
+    # ---------- notebook-level metadata ----------
+
+    async def get_metadata(self) -> dict[str, Any]:
+        """Return an isolated copy of notebook-level metadata."""
+        async with self._lock:
+            content = await self.fetch()
+            return json.loads(json.dumps(content.get("metadata") or {}))
+
+    async def update_metadata(self, updates: dict[str, Any]) -> None:
+        """Shallow-merge notebook metadata through one guarded GET/PUT cycle."""
+        if not isinstance(updates, dict):
+            raise TypeError("update_metadata: 'updates' must be a dict")
+        try:
+            sanitized = json.loads(json.dumps(updates, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("update_metadata: values must be JSON-compatible") from exc
+
+        async with self._lock:
+            content = await self.fetch()
+            metadata = content.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                raise TypeError("Notebook metadata is not a mapping")
+            metadata.update(sanitized)
+            content["metadata"] = metadata
+            await self.save(content)
+        for cb in self._on_change:
+            cb({"op": "metadata-updated", "keys": list(sanitized)})
+
+    async def update_metadata_map(
+        self,
+        key: str,
+        updates: dict[str, Any],
+        *,
+        removals: list[str] | None = None,
+    ) -> None:
+        """Merge mapping entries through one guarded GET/PUT cycle."""
+        if not isinstance(key, str):
+            raise TypeError("update_metadata_map: 'key' must be a string")
+        if not isinstance(updates, dict):
+            raise TypeError("update_metadata_map: 'updates' must be a dict")
+        try:
+            sanitized = json.loads(json.dumps(updates, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("update_metadata_map: values must be JSON-compatible") from exc
+
+        removed = list(removals or [])
+        if not all(isinstance(entry, str) for entry in removed):
+            raise TypeError("update_metadata_map: 'removals' must contain only strings")
+
+        async with self._lock:
+            content = await self.fetch()
+            metadata = content.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                raise TypeError("Notebook metadata is not a mapping")
+            current = metadata.get(key, {})
+            if not isinstance(current, dict):
+                raise TypeError(f"Notebook metadata {key!r} is not a mapping")
+            merged = dict(current)
+            for entry in removed:
+                merged.pop(entry, None)
+            merged.update(sanitized)
+            metadata[key] = merged
+            content["metadata"] = metadata
+            await self.save(content)
+        for cb in self._on_change:
+            cb({"op": "metadata-map-updated", "key": key, "keys": list(sanitized)})
+
     # ---------- cell reordering ----------
 
     async def move_cell(self, from_index: int, to_index: int) -> None:

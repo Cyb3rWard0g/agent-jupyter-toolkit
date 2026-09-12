@@ -474,6 +474,41 @@ class LocalFileDocumentTransport(NotebookDocumentTransport):
         for cb in self._on_change:
             cb({"op": "metadata-updated", "keys": list(updates.keys())})
 
+    async def update_metadata_map(
+        self,
+        key: str,
+        updates: dict[str, Any],
+        *,
+        removals: list[str] | None = None,
+    ) -> None:
+        """Atomically merge entries into a mapping-valued metadata field."""
+        if not isinstance(key, str):
+            raise TypeError("update_metadata_map: 'key' must be a string")
+        if not isinstance(updates, dict):
+            raise TypeError("update_metadata_map: 'updates' must be a dict")
+        try:
+            sanitized = json.loads(json.dumps(updates, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("update_metadata_map: values must be JSON-compatible") from exc
+
+        removed = list(removals or [])
+        if not all(isinstance(entry, str) for entry in removed):
+            raise TypeError("update_metadata_map: 'removals' must contain only strings")
+
+        async with self._lock:
+            nb = self._load_nb()
+            current = nb["metadata"].get(key, {})
+            if not isinstance(current, dict):
+                raise TypeError(f"Notebook metadata {key!r} is not a mapping")
+            merged = dict(current)
+            for entry in removed:
+                merged.pop(entry, None)
+            merged.update(sanitized)
+            nb["metadata"][key] = merged
+            await self._queue_write(nb)
+        for cb in self._on_change:
+            cb({"op": "metadata-map-updated", "key": key, "keys": list(sanitized)})
+
     async def resolve_cell_index(self, cell_id: str) -> int:
         """Return the zero-based index of the cell matching *cell_id*.
 

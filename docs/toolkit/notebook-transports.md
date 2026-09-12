@@ -34,6 +34,9 @@ await transport.delete_cell(index)
 await transport.resolve_cell_index(cell_id)
 await transport.get_cell_by_id(cell_id)
 await transport.move_cell(from_index, to_index)
+await transport.get_metadata()
+await transport.update_metadata(updates)
+await transport.update_metadata_map(key, updates, removals=None)
 transport.on_change(callback)
 ```
 
@@ -148,8 +151,9 @@ Features:
   its untouched, metadata-free placeholder removed; meaningful blank cells are
   preserved
 - Required/preferred/disabled selection with classified preferred-mode fallback
-- Shared notebook metadata uses per-key CRDT updates, so dependency tracking and
-  unrelated concurrent metadata edits converge without replacing the whole map
+- Shared notebook metadata uses per-key CRDT updates. Mapping-valued fields can
+  also use entry-level shared maps, so separate agents installing different
+  dependencies converge without replacing the dependency manifest
 
 `collaboration_mode="required"` propagates every collaboration startup error.
 `"preferred"` falls back to Contents only for an unsupported collaboration API

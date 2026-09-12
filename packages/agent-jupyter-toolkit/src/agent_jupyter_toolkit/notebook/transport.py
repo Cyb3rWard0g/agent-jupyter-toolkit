@@ -479,6 +479,32 @@ class NotebookDocumentTransport(Protocol):
         """
         ...
 
+    async def update_metadata_map(
+        self,
+        key: str,
+        updates: dict[str, Any],
+        *,
+        removals: list[str] | None = None,
+    ) -> None:
+        """Merge entries into one mapping-valued metadata field atomically.
+
+        Unlike :meth:`update_metadata`, this operation merges one level below
+        the notebook metadata. Implementations must serialize the complete
+        read/modify/write sequence. Collaborative transports should represent
+        individual entries as shared-map values so updates to different entry
+        names converge.
+
+        Args:
+            key: Top-level notebook metadata key containing the mapping.
+            updates: Entry names and JSON-compatible values to add or replace.
+            removals: Entry names to remove before applying *updates*.
+
+        Raises:
+            RuntimeError: on IO/network errors.
+            TypeError: if the arguments or stored value are not mappings.
+        """
+        ...
+
     def on_change(self, cb: Callable[[dict[str, Any]], None]) -> None:
         """
         Register a callback to be invoked after a save or cell mutation.
