@@ -29,8 +29,10 @@ High-level kernel session wrapping a `KernelTransport`.
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `start()` | `async def start() -> None` | Start/attach to kernel |
-| `shutdown()` | `async def shutdown() -> None` | Stop kernel, release resources |
+| `shutdown()` | `async def shutdown() -> None` | Release resources; terminate only an owned kernel/session |
+| `shutdown_kernel()` | `async def shutdown_kernel() -> None` | Explicitly terminate even a borrowed kernel |
 | `is_alive()` | `async def is_alive() -> bool` | Kernel responsiveness check |
+| `session_info()` | `def session_info() -> SessionInfo` | IDs, ownership, generation, connection/encryption policy |
 
 Supports `async with` for automatic lifecycle.
 
@@ -43,7 +45,10 @@ async def execute(
     *,
     timeout: float | None = None,
     output_callback: OutputCallback | None = None,
+    silent: bool = False,
     store_history: bool = True,
+    user_expressions: dict | None = None,
+    metadata: dict | None = None,
     allow_stdin: bool = False,
     stop_on_error: bool = True,
 ) -> ExecutionResult
@@ -82,6 +87,13 @@ class SessionConfig:
     kernel_name: str = "python3"
     connection_file_name: str | None = None
     packer: str | None = None
+    startup_timeout: float = 60.0
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    kernel_args: list[str] = field(default_factory=list)
+    max_output_bytes: int | None = 50 * 1024 * 1024
+    transport_encryption: str = "disabled"
+    manager_factory: Callable[..., Any] | None = None
     server: ServerConfig | None = None
 ```
 
@@ -95,6 +107,25 @@ class ServerConfig:
     headers: dict[str, str] | None = None
     kernel_name: str = "python3"
     notebook_path: str | None = None
+    request_timeout: float = 30.0
+    startup_timeout: float = 60.0
+    max_output_bytes: int | None = 50 * 1024 * 1024
+```
+
+### `SessionInfo`
+
+```python
+@dataclass(frozen=True)
+class SessionInfo:
+    transport: str
+    kernel_id: str | None = None
+    server_session_id: str | None = None
+    owns_kernel: bool = False
+    owns_session: bool = False
+    connection_file: str | None = None
+    kernel_generation: int = 0
+    transport_encryption: str = "disabled"
+    encryption_enabled: bool = False
 ```
 
 ### `ExecutionResult`
@@ -109,6 +140,17 @@ class ExecutionResult:
     outputs: list[dict[str, Any]] = field(...)      # nbformat output dicts
     user_expressions: dict[str, Any] | None = None
     elapsed_ms: float | None = None
+    request_id: str | None = None
+    cell_id: str | None = None
+    source_hash: str | None = None
+    kernel_generation: int = 0
+    persistence_status: str = "not-requested"
+    persistence_error: str | None = None
+    output_truncated: bool = False
+    dropped_output_bytes: int = 0
+    callback_snapshots_coalesced: int = 0
+    outcome: str = "completed"
+    timed_out: bool = False
 ```
 
 ### `CompleteResult`
@@ -174,7 +216,21 @@ class KernelInfoResult:
     language_info: dict[str, Any] = field(...)
     banner: str = ""
     status: str = "ok"
+    help_links: list[dict[str, Any]] = field(default_factory=list)
+    supported_features: list[str] = field(default_factory=list)
+    raw_content: dict[str, Any] = field(default_factory=dict)
 ```
+
+### Optional notebook utilities
+
+`execute_notebook_batch(notebook, *, kernel_name="python3", timeout=120,
+allow_errors=False, cwd=None)` executes a validated copy with a dedicated
+nbclient-owned kernel and requires the `batch` extra. Its per-cell timeout is an
+integer number of seconds, or `None` for no timeout.
+
+`inspect_notebook_trust(notebook, *, notary)` returns signature and cell-trust
+status against the caller-supplied `NotebookNotary`. It does not sign or mutate
+the notebook.
 
 ### `OutputCallback`
 
@@ -383,6 +439,7 @@ def make_document_transport(
     token: str | None,
     headers_json: str | None,
     prefer_collab: bool = False,
+    collaboration_mode: str | None = None,
     create_if_missing: bool = False,
     local_autosave_delay: float | None = None,
 ) -> NotebookDocumentTransport

@@ -215,15 +215,15 @@ ExecutionResult
 ```
 NotebookSession.append_and_run(code)
     │
-    ├─▶ doc.append_code_cell(code) → cell_index
+    ├─▶ doc.append_code_cell(code) → capture cell ID and source hash
     │
     ├─▶ kernel.execute(code, output_callback=streaming_cb)
     │       │
     │       ▼
-    │   Each IOPub message:
-    │       streaming_cb → doc.update_cell_outputs(idx, outputs, count)
+    │   Incremental reducer snapshots:
+    │       streaming_cb → doc.update_cell_outputs_by_id(id, outputs, count)
     │
-    ├─▶ Final: doc.update_cell_outputs(idx, normalized_outputs, count)
+    ├─▶ Final: validate ID/source and persist normalized outputs
     │
     ▼
 (cell_index, ExecutionResult)
@@ -239,20 +239,28 @@ simple use cases:
 | Package | Purpose |
 |---------|---------|
 | `jupyter_client` | ZMQ kernel management, wire protocol |
-| `jupyter_kernel_client` | Extended kernel client features |
 | `nbformat` | Notebook format read/write/validation |
 | `aiohttp` | HTTP client for server transports |
 
-### Collaboration (optional, imported lazily)
+### Collaboration client
 
 | Package | Purpose |
 |---------|---------|
 | `pycrdt` | CRDT types (Doc, Array, Map, Text, Awareness) |
 | `jupyter_ydoc` | YNotebook — Yjs notebook model |
 
-The collaborative transport (`CollabYjsDocumentTransport`) is only imported
-when `prefer_collab=True` is passed to the factory. This avoids pulling in
-`pycrdt` and `jupyter_ydoc` for kernel-only or file-only workflows.
+The collaboration client libraries are core because the package exposes the
+collaborative document transport directly. The server-side
+`jupyter-collaboration` extension remains an integration dependency.
+
+### Feature extras
+
+| Extra | Purpose |
+|---------|---------|
+| `local` | ipykernel for a managed local Python kernel |
+| `batch` | nbclient-backed dedicated notebook execution |
+| `dataframe` | pandas and Arrow serialization |
+| `integration` | Jupyter Server and collaboration test environment |
 
 ### Optional scientific stack
 
@@ -266,8 +274,12 @@ These are detected at runtime and registered via `mimetypes.register_*_handlers(
 
 ## Thread Safety and Concurrency
 
-- **Sessions and transports are designed for single-task use.** Share them
-  across tasks only with external synchronization.
+- Shared shell-channel consumers are serialized so replies cannot be stolen by
+  another execution or introspection request. Interrupt and lifecycle control
+  remain available through their own paths.
+- Serialize multi-step notebook workflows when sharing a `NotebookSession`
+  across tasks; the kernel request lock does not cover document edits before
+  and after each execution.
 - `KernelManager` uses an internal `asyncio.Lock` for lifecycle operations
   (start, shutdown, restart, interrupt).
 - `LocalFileDocumentTransport` uses an `asyncio.Lock` for file I/O.

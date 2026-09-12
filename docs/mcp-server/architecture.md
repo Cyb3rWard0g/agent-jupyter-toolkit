@@ -134,12 +134,16 @@ The `_build_session()` function creates two transports based on the session mode
 ### Server Mode
 
 ```python
-kernel = create_kernel("remote", base_url=..., token=..., kernel_name=...)
-doc = create_notebook_transport("remote", notebook_path, base_url=..., token=..., prefer_collab=True)
+kernel = create_kernel(
+    "remote", base_url=..., token=..., kernel_name=..., notebook_path=notebook_path
+)
+doc = create_notebook_transport(
+    "remote", notebook_path, base_url=..., token=..., collaboration_mode="preferred"
+)
 ```
 
-- **Kernel:** Connects to the Jupyter REST API to create a kernel, then opens a WebSocket for execution
-- **Document:** If `prefer_collab=True`, connects via Yjs WebSocket for real-time sync; otherwise uses the Contents REST API
+- **Kernel:** Reuses or creates the Jupyter Sessions API kernel bound to the same notebook path, then opens its WebSocket channels
+- **Document:** Uses required/preferred/disabled collaboration policy. Preferred mode falls back only for classified unsupported API responses and reports the result.
 
 ### Local Mode
 
@@ -179,8 +183,8 @@ This ensures:
 
 | Package | Purpose |
 |---|---|
-| `agent-jupyter-toolkit>=0.2.15` | Kernel management, notebook transport, code execution utilities |
-| `mcp>=1.26.0` | MCP Python SDK — `FastMCP`, `Context`, `ToolAnnotations`, transport implementations |
+| `agent-jupyter-toolkit` | Kernel management, notebook transport, code execution utilities; developed and released with the MCP package |
+| `mcp>=1.26.0,<3` | MCP Python SDK — compatibility adapter supports FastMCP 1.26 and MCPServer 2.x |
 
 The server delegates all Jupyter-specific logic to `agent-jupyter-toolkit`. The MCP layer is responsible only for:
 - Exposing tools with the correct schemas

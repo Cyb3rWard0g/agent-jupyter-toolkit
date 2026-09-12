@@ -7,11 +7,14 @@ This guide covers installation for both packages in this monorepo.
 ### From PyPI
 
 ```bash
-# Install the toolkit (domain library)
-pip install agent-jupyter-toolkit
+# Install the toolkit with a managed local Python kernel
+pip install "agent-jupyter-toolkit[local]"
 
 # Install optional DataFrame serialization support
 pip install agent-jupyter-toolkit[dataframe]
+
+# Install optional nbclient batch notebook execution
+pip install agent-jupyter-toolkit[batch]
 
 # Install the MCP server (also pulls in the toolkit as a dependency)
 pip install mcp-jupyter-notebook
@@ -25,7 +28,7 @@ pip install mcp-jupyter-notebook[dataframe]
 ```bash
 git clone https://github.com/Cyb3rWard0g/agent-jupyter-toolkit.git
 cd agent-jupyter-toolkit
-uv sync --all-packages
+uv sync --all-packages --all-extras --dev
 ```
 
 This installs both `agent-jupyter-toolkit` and `mcp-jupyter-notebook` in
@@ -77,6 +80,10 @@ asyncio.run(main())
 3. `session.execute()` sent code to the kernel and collected IOPub outputs
 4. `session.shutdown()` (called by `__aexit__`) shut down the kernel process
 
+When a session attaches to an existing local connection file or remote notebook
+session, context exit detaches and preserves that borrowed kernel. Use
+`shutdown_kernel()` only when you explicitly intend to terminate it.
+
 ## Your First Remote Session
 
 Connect to a running Jupyter Server instead of spawning a local kernel:
@@ -91,6 +98,7 @@ async def main():
         server=ServerConfig(
             base_url="http://localhost:8888",
             token="YOUR_TOKEN",
+            notebook_path="analysis.ipynb",
         ),
     )
     async with create_session(config) as session:
@@ -99,6 +107,11 @@ async def main():
 
 asyncio.run(main())
 ```
+
+Providing `notebook_path` binds execution to the same Jupyter Sessions API
+kernel used for that notebook. See [kernel sessions](toolkit/kernel-sessions.md)
+for result fields and retry behavior, and [notebook transports](toolkit/notebook-transports.md)
+for collaboration policy and persistence conflicts.
 
 ## Your First Notebook Edit
 

@@ -42,7 +42,7 @@ management:
 ```python
 async with create_session(config) as session:
     result = await session.execute("print('hello')")
-# kernel is shut down here
+# a kernel created by this session is shut down here; a borrowed kernel is preserved
 ```
 
 Or manage manually:
@@ -73,12 +73,9 @@ print(result.outputs)          # list of nbformat output dicts
 ### With timeout
 
 ```python
-import asyncio
-
-try:
-    result = await session.execute("import time; time.sleep(300)", timeout=5.0)
-except asyncio.TimeoutError:
-    print("Execution timed out")
+result = await session.execute("import time; time.sleep(300)", timeout=5.0)
+if result.timed_out:
+    print(result.outcome)  # "unknown": completion was not observed
 ```
 
 ### Real-time output streaming
@@ -97,8 +94,13 @@ result = await session.execute(
 )
 ```
 
-The callback is awaited in strict message order. `outputs` is a cumulative
-list of nbformat-like dicts representing the current cell state.
+Callbacks arrive during execution in message order. `outputs` is a cumulative
+nbformat-like snapshot of the current cell state. When a callback is slower
+than a noisy local kernel, intermediate snapshots can be coalesced;
+`callback_snapshots_coalesced` reports the count. The local transport retains
+one pending snapshot. The server transport bounds its incoming message queue
+and waits for each callback. Successful execution delivers the final state;
+cancellation stops callback delivery, and disconnect errors retain partial results.
 
 ### Execution options
 
@@ -107,11 +109,21 @@ result = await session.execute(
     code,
     timeout=30.0,           # max seconds (None = no limit)
     output_callback=cb,     # real-time streaming
+    silent=False,           # suppress ordinary output when supported
     store_history=True,     # record in kernel history
+    user_expressions={"total": "sum(values)"},
+    metadata={"cellId": "stable-cell-id"},
     allow_stdin=False,      # enable kernel stdin requests
     stop_on_error=True,     # abort queue on error
 )
 ```
+
+Results also report `request_id`, `cell_id`, `source_hash`,
+`kernel_generation`, `persistence_status`, `output_truncated`,
+`dropped_output_bytes`, `outcome`, and `timed_out`. The default output budget
+is 50 MiB for retained output and display-update sidecars. A timeout or disconnect
+does not prove the kernel skipped the code,
+so check kernel state before retrying work with side effects.
 
 ## Kernel Introspection
 
@@ -163,6 +175,8 @@ print(info.implementation)         # "ipython"
 print(info.implementation_version) # "8.x.x"
 print(info.language_info)          # {"name": "python", "version": "3.11.x", ...}
 print(info.banner)                 # IPython startup banner
+print(info.supported_features)     # explicit capabilities advertised by the kernel
+print(info.help_links)
 ```
 
 ## Kernel Control
@@ -206,6 +220,22 @@ Parameters:
 - `n`: number of entries for `"tail"` / max results for `"search"`
 - `output`: include output text alongside input
 - `raw`: return raw (un-transformed) input
+- `session`, `start`, `stop`: history session and bounds for range requests
+- `pattern`, `unique`: match expression and deduplication for search requests
+
+### Ownership and session identity
+
+```python
+identity = session.session_info()
+print(identity.kernel_id, identity.server_session_id)
+print(identity.owns_kernel, identity.owns_session)
+print(identity.kernel_generation, identity.encryption_enabled)
+```
+
+`shutdown()` terminates resources created by this client and detaches from
+borrowed kernels. Use `shutdown_kernel()` for an explicit destructive shutdown
+of an attached kernel. Remote notebook sessions reuse the unique Sessions API
+kernel for `ServerConfig.notebook_path`; ambiguous duplicates raise an error.
 
 ## Variable Management
 

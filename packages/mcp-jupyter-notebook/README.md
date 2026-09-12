@@ -17,6 +17,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 - **Real-time sync** — Yjs collaboration transport shows cell edits instantly in JupyterLab
 - **Two session modes** — connect to a remote Jupyter server or run a local kernel
 - **Three transports** — stdio (for editors), SSE, or streamable HTTP
+- **MCP SDK compatibility** — supports the 1.26 API and the 2.x `MCPServer` API
+- **Observable collaboration policy** — required, preferred with classified fallback, or disabled
 - **Zero config defaults** — sensible defaults with full override via CLI args or env vars
 
 ## Quick Start
@@ -191,8 +193,14 @@ All settings can be passed as **CLI arguments** or **environment variables**. CL
 | `MCP_JUPYTER_LOG_LEVEL` | — | `DEBUG`, `INFO`, `WARNING`, `ERROR` | `INFO` |
 | `MCP_JUPYTER_HEADERS_JSON` | — | Extra HTTP headers as JSON object | — |
 | `MCP_JUPYTER_PREFER_COLLAB` | — | Use Yjs real-time sync (`true`/`false`) | `true` |
+| `MCP_JUPYTER_COLLABORATION_MODE` | `--collaboration-mode` | `required`, `preferred`, or `disabled` | `preferred` |
 
 > Full configuration reference: [docs/mcp-server/configuration.md](../../docs/mcp-server/configuration.md)
+
+`MCP_JUPYTER_PREFER_COLLAB` remains a compatibility alias when the explicit
+mode is unset. Session/list results show the selected document transport and a
+fallback reason. Kernel execution results include stable cell/request identity,
+persistence status, truncation accounting, and timeout/outcome fields.
 
 ---
 

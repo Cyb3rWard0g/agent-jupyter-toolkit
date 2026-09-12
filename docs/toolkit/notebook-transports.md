@@ -60,6 +60,8 @@ transport = make_document_transport(
 Features:
 - Thread-safe read/write via asyncio lock
 - Atomic saves (write to temp file, then rename)
+- Full nbformat validation before replacing the file
+- Stable cell-ID and expected-source checks for output persistence
 - Optional **debounced autosave** — batches rapid edits into a single write
 - Path security via configurable allowlist (see [Configuration](configuration.md))
 
@@ -102,6 +104,12 @@ Features:
 - `PUT /api/contents/{path}` for save
 - Token and cookie-based authentication
 - Automatic notebook creation via PUT when `create_if_missing=True`
+- Candidate validation before PUT and snapshot-bound freshness checks for `NotebookBuffer`
+
+Contents freshness checks use a GET followed by a PUT, so they cannot provide an
+atomic compare-and-swap against another writer. Use collaboration mode for
+concurrent editing. A buffer retains the revision from its own `load()` call;
+another reader cannot refresh that buffer's revision implicitly.
 
 ### 3. Collaborative Yjs/CRDT Transport
 
@@ -117,6 +125,7 @@ transport = make_document_transport(
     token="YOUR_TOKEN",
     headers_json=None,
     prefer_collab=True,
+    collaboration_mode="preferred",
     create_if_missing=True,
 )
 ```
@@ -128,7 +137,14 @@ Features:
 - **Awareness protocol** — broadcast presence metadata (cursors, user info)
 - Automatic reconnection and state recovery
 - **Default empty cell stripping** — JupyterLab adds a blank code cell to every new notebook; the transport removes it on `start()` so the notebook begins truly empty
-- Falls back to Contents API transport if `prefer_collab=False`
+- Required/preferred/disabled selection with classified preferred-mode fallback
+
+`collaboration_mode="required"` propagates every collaboration startup error.
+`"preferred"` falls back to Contents only for an unsupported collaboration API
+(HTTP 400, 404, 405, 426, or 501). Authentication, permission, malformed-response,
+and transient connection failures retain their original errors. `"disabled"`
+uses Contents directly. The older `prefer_collab` boolean maps to preferred or
+disabled when no explicit mode is supplied.
 
 #### Awareness (presence metadata)
 
@@ -175,16 +191,18 @@ transport = make_document_transport(
     token=...,
     headers_json=...,
     prefer_collab=False,
+    collaboration_mode=None,
     create_if_missing=False,
     local_autosave_delay=None,
 )
 ```
 
-| `mode` | `prefer_collab` | Result |
+| `mode` | Collaboration mode | Result |
 |--------|----------------|--------|
 | `"local"` | — | `LocalFileDocumentTransport` |
-| `"server"` | `False` | `ContentsApiDocumentTransport` |
-| `"server"` | `True` | `CollabYjsDocumentTransport` |
+| `"server"` | `disabled` | `ContentsApiDocumentTransport` |
+| `"server"` | `preferred` | Collaboration with classified Contents fallback |
+| `"server"` | `required` | `CollabYjsDocumentTransport`; no fallback |
 | invalid config | — | No-op fallback transport |
 
 ## NotebookSession
@@ -233,11 +251,22 @@ async with NotebookSession(kernel=kernel, doc=doc) as nb:
 
 During execution, outputs are streamed to the document cell in real time:
 
-1. Each IOPub message updates the cell immediately (delta or full replace)
+1. Ordered IOPub state snapshots update the cell during execution
 2. Execution count changes propagate to the cell
-3. `clear_output` messages clear accumulated outputs
+3. Deferred clears wait for replacement output and display IDs update in place
 4. A final authoritative write with normalized nbformat outputs happens at the
    end of execution
+
+The cell ID and original source are checked on every write. If the cell is
+deleted or edited while code runs, execution remains successful but the result
+contains `persistence_status="error"` and the conflict; output is never redirected
+to the cell that later occupies the same numeric index. Cross-cell display update
+failures are reported through the same persistence fields.
+
+Display handles can target several cells. Rerunning a target cell, replacing its
+outputs, or restarting the kernel invalidates its old display registrations.
+Run-all results retain each cell's persistence and timeout details; the aggregate
+status is an error if either execution or persistence fails.
 
 ## NotebookBuffer
 

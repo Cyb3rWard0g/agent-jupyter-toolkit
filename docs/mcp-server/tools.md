@@ -106,7 +106,14 @@ Append a new code cell to the notebook, execute it, and return outputs.
 | `code` | `string` | Yes | — | Python code to execute |
 | `timeout` | `float` | No | `120.0` | Execution timeout in seconds |
 
-**Returns:** `ok`, `cell_id`, `cell_index`, `execution_count`, `status`, `stdout`, `stderr`, `outputs`, `text_outputs`, `formatted_output`, `error_message`, `elapsed_seconds`
+**Returns:** ordinary output fields plus `cell_id`, `request_id`, `source_hash`,
+`kernel_generation`, `persistence_status`, `persistence_error`,
+`output_truncated`, `dropped_output_bytes`, `outcome`, and `timed_out`.
+
+Execution success and notebook persistence are separate. A stale/deleted cell can
+return successful kernel output with `persistence_status="error"`. A timeout or
+disconnect can have `outcome="unknown"`; callers should inspect kernel state before
+retrying code with side effects.
 
 **Example prompt:** *"Run `print('Hello, world!')` in the notebook"*
 
@@ -139,7 +146,8 @@ Execute code directly in the kernel **without** creating a notebook cell. Use th
 | `code` | `string` | Yes | — | Python code to execute |
 | `timeout` | `float` | No | `120.0` | Execution timeout in seconds |
 
-**Returns:** `ok`, `status`, `stdout`, `stderr`, `outputs`, `text_outputs`, `formatted_output`, `error_message`, `elapsed_seconds`
+**Returns:** ordinary output fields plus `request_id`, `kernel_generation`,
+`output_truncated`, `dropped_output_bytes`, `outcome`, and `timed_out`.
 
 **Example prompt:** *"Check if scikit-learn is importable without adding a cell"*
 
@@ -436,7 +444,9 @@ Get detailed kernel metadata including protocol version, implementation, languag
 |---|---|---|---|---|
 | *(none)* | — | — | — | — |
 
-**Returns:** `ok`, `protocol_version`, `implementation`, `implementation_version`, `language_info`, `banner`
+**Returns:** `ok`, `protocol_version`, `implementation`,
+`implementation_version`, `language_info`, `banner`, `help_links`,
+`supported_features`, and `raw_content`.
 
 **Example prompt:** *"What Python version is the kernel running?"*
 
@@ -444,7 +454,8 @@ Get detailed kernel metadata including protocol version, implementation, languag
 
 ### `notebook_session_info`
 
-Get session info: kernel type, whether it's alive, connection details, and kernel name.
+Get non-secret kernel/session identity, ownership, generation, encryption state,
+selected notebook transport, collaboration mode, and fallback reason.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|

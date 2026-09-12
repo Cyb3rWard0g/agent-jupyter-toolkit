@@ -10,8 +10,10 @@ A Python toolkit for building agent tools that interact with Jupyter kernels and
   - **Local transport** — direct ZMQ communication with local kernel processes
   - **Server transport** — HTTP REST + WebSocket to remote Jupyter servers
 - **Code execution** with real-time streaming output callbacks
+- **Notebook-compatible output state** for deferred clears, display updates, stream coalescing, and bounded output
 - **Kernel introspection** — tab-completion, object inspection, code-completeness checks, and execution history retrieval
 - **Kernel control** — interrupt running cells, restart kernels, query kernel metadata (language, version, protocol)
+- **Ownership-aware lifecycle** — normal shutdown preserves attached/borrowed kernels
 - **Variable management** — inspect and set kernel variables safely (base64-encoded payloads)
 - **Extensible hooks** — pre/post execution and output hooks for instrumentation
 
@@ -25,6 +27,8 @@ A Python toolkit for building agent tools that interact with Jupyter kernels and
 - **In-memory notebook buffer** for staged edits with explicit commit
 - **Local notebook autosave** with optional debounced writes
 - **Change observers** — register callbacks for cell mutations, saves, and awareness events
+- **Validated persistence** with stable cell identity and explicit source/persistence conflicts
+- **Optional batch execution and trust inspection** through public nbclient/nbformat APIs
 
 ## Use Cases
 
@@ -44,20 +48,26 @@ pip install agent-jupyter-toolkit
 # Install optional DataFrame serialization support
 pip install agent-jupyter-toolkit[dataframe]
 
+# Include a managed local Python kernel
+pip install agent-jupyter-toolkit[local]
+
+# Include the nbclient batch executor
+pip install agent-jupyter-toolkit[batch]
+
 # Or using uv
 uv pip install agent-jupyter-toolkit
 ```
 
-Install the `dataframe` extra only if you want pandas/Arrow-backed DataFrame
-serialization and inspection helpers. Core kernel and notebook features do not
-require it.
+The `local` extra installs ipykernel, `batch` installs nbclient, and `dataframe`
+installs pandas/Arrow serialization support. The `integration` extra is for
+maintainers running the real Jupyter Server and collaboration tests.
 
 ### Development (monorepo)
 
 ```sh
 git clone https://github.com/Cyb3rWard0g/agent-jupyter-toolkit.git
 cd agent-jupyter-toolkit
-uv sync --all-packages
+uv sync --all-packages --all-extras --dev
 ```
 
 This installs both `agent-jupyter-toolkit` and `mcp-jupyter-notebook` in
@@ -74,6 +84,7 @@ local kernel process for you (via `jupyter_client`) and connects over ZMQ.
 import asyncio
 from agent_jupyter_toolkit.kernel import SessionConfig, create_session
 
+
 async def main() -> None:
     async with create_session(SessionConfig(mode="local", kernel_name="python3")) as session:
         result = await session.execute(
@@ -84,6 +95,7 @@ async def main() -> None:
         )
     print("status:", result.status)
     print("stdout:", result.stdout.strip())
+
 
 asyncio.run(main())
 ```
@@ -116,6 +128,7 @@ async with create_session() as session:
 
     # Interrupt a long-running cell
     import asyncio
+
     task = asyncio.create_task(session.execute("import time; time.sleep(999)"))
     await asyncio.sleep(1)
     await session.interrupt()
@@ -136,8 +149,10 @@ For server-backed and notebook scenarios, see the [quickstarts/](quickstarts/) d
 | `is_complete(code)` | Syntax completeness check |
 | `history(*, output, raw, hist_access_type, n)` | Execution history retrieval |
 | `kernel_info()` | Kernel metadata (language, version, protocol) |
+| `session_info()` | Non-secret kernel/session IDs, ownership, generation, and encryption state |
 | `is_alive()` | Health check |
-| `start()` / `shutdown()` | Lifecycle management (also via `async with`) |
+| `start()` / `shutdown()` | Start and close; shutdown terminates only resources created by this client |
+| `shutdown_kernel()` | Explicitly terminate a kernel, including a borrowed one |
 
 ### Notebook Document Transport
 
@@ -196,6 +211,10 @@ agent_jupyter_toolkit
 | [nbformat](https://pypi.org/project/nbformat/) | Notebook file format handling |
 | [aiohttp](https://pypi.org/project/aiohttp/) | Async HTTP/WS for server transport |
 | [pandas](https://pypi.org/project/pandas/) + [pyarrow](https://pypi.org/project/pyarrow/) | Optional `dataframe` extra for DataFrame variable inspection |
+
+See the [API reference](../../docs/toolkit/api-reference.md) for execution result
+fields and optional APIs, and [configuration](../../docs/toolkit/configuration.md)
+for collaboration modes and local launch options.
 
 ## Contributing
 
