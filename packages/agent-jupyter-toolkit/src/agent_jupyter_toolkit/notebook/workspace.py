@@ -8,6 +8,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from ._workspace_files import create_workspace_file_backend
+
 if TYPE_CHECKING:
     from .session import NotebookSession
 
@@ -57,10 +59,17 @@ class NotebookWorkspace:
         self._opening: dict[str, asyncio.Task[NotebookSession]] = {}
         self._closing: dict[str, asyncio.Task[None]] = {}
         self._deleting: dict[str, asyncio.Task[bool]] = {}
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._registry_lock = asyncio.Lock()
         self._shutting_down = False
         self._default_path: str | None = None
         self.default_path = default_path
+        self._file_backend = create_workspace_file_backend(
+            self._config.mode,
+            base_url=self._config.base_url,
+            token=self._config.token,
+            headers=self._config.headers,
+        )
 
     # ── public API ──────────────────────────────────
 
@@ -228,6 +237,10 @@ class NotebookWorkspace:
         """
         path = self._session_key(path)
         async with self._registry_lock:
+            if self._shutting_down:
+                raise RuntimeError(
+                    "Notebook workspace is shutting down; notebooks cannot be deleted"
+                )
             task = self._deleting.get(path)
             if task is None:
                 task = asyncio.create_task(
@@ -238,21 +251,98 @@ class NotebookWorkspace:
         return await asyncio.shield(task)
 
     async def close_all(self) -> None:
-        """Close every open session.  Used during server shutdown."""
+        """Close every session completely, even if the waiting caller is cancelled."""
         async with self._registry_lock:
-            # This is a terminal lifecycle transition. Establish the gate and
-            # take the operation snapshot under the same lock so an open
-            # cannot slip between them and survive server shutdown.
             self._shutting_down = True
-            paths = list(
-                dict.fromkeys([*self._sessions, *self._opening, *self._closing, *self._deleting])
-            )
-        for p in paths:
-            await self.close(p)
+            if self._shutdown_task is None:
+                paths = list(
+                    dict.fromkeys(
+                        [*self._sessions, *self._opening, *self._closing, *self._deleting]
+                    )
+                )
+                deleting = list(dict.fromkeys(self._deleting.values()))
+                self._shutdown_task = asyncio.create_task(
+                    self._drain_shutdown(paths, deleting),
+                    name="jupyter-workspace-shutdown",
+                )
+            task = self._shutdown_task
+        await self._wait_for_shutdown(task)
+
+    async def _drain_shutdown(
+        self,
+        paths: list[str],
+        deleting: list[asyncio.Task[bool]],
+    ) -> None:
+        """Finish the terminal shutdown task without leaving later paths open."""
+        errors: list[BaseException] = []
+        for path in paths:
+            try:
+                await self.close(path)
+            except BaseException as exc:
+                errors.append(exc)
+                log.exception("Failed to close notebook during workspace shutdown: %s", path)
+
         async with self._registry_lock:
-            deleting = list(self._deleting.values())
+            deleting = list(dict.fromkeys([*deleting, *self._deleting.values()]))
         if deleting:
-            await asyncio.gather(*(asyncio.shield(task) for task in deleting))
+            results = await asyncio.gather(
+                *(asyncio.shield(task) for task in deleting),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    errors.append(result)
+                    log.error("Notebook deletion failed during workspace shutdown: %s", result)
+
+        if errors:
+            raise errors[0]
+
+    @staticmethod
+    async def _wait_for_shutdown(task: asyncio.Task[None]) -> None:
+        """Delay caller cancellation until the retained shutdown task has drained."""
+        current = asyncio.current_task()
+        cancellation_requests = 0
+        shutdown_error: BaseException | None = None
+
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if current is None or current.cancelling() == 0:
+                    raise
+                while current.cancelling():
+                    current.uncancel()
+                    cancellation_requests += 1
+                if task.cancelled():
+                    shutdown_error = exc
+                    break
+            except BaseException as exc:
+                shutdown_error = exc
+                break
+
+        if shutdown_error is None and task.done():
+            try:
+                task.result()
+            except BaseException as exc:
+                shutdown_error = exc
+
+        if cancellation_requests:
+            if shutdown_error is not None:
+                log.error(
+                    "Workspace shutdown failed while its caller was cancelled",
+                    exc_info=(
+                        type(shutdown_error),
+                        shutdown_error,
+                        shutdown_error.__traceback__,
+                    ),
+                )
+            assert current is not None
+            for _ in range(cancellation_requests):
+                current.cancel()
+            raise asyncio.CancelledError() from shutdown_error
+
+        if shutdown_error is not None:
+            raise shutdown_error
 
     def get(self, path: str | None = None) -> NotebookSession:
         """Retrieve a session by path, falling back to the default.
@@ -321,10 +411,7 @@ class NotebookWorkspace:
             One entry per notebook with ``path``, ``name``, and
             ``is_open`` flag.
         """
-        if self._config.mode == "local":
-            return self._list_local_files(directory, recursive)
-        else:
-            return await self._list_server_files(directory, recursive)
+        return await self._file_backend.list_notebooks(directory, recursive, self.__contains__)
 
     # ── private ─────────────────────────────────────
 
@@ -338,15 +425,7 @@ class NotebookWorkspace:
         """Build, start, and register one shared in-flight session."""
         session: NotebookSession | None = None
         try:
-            if self._config.mode == "local":
-                nb_path = Path(path)
-                if not nb_path.exists():
-                    log.info("Creating new notebook: %s", nb_path)
-                    nb_path.parent.mkdir(parents=True, exist_ok=True)
-                    import nbformat
-
-                    nbformat.write(nbformat.v4.new_notebook(), str(nb_path))
-
+            await self._file_backend.ensure_notebook(path)
             log.info("Opening notebook session: %s", path)
             session = self._build_session(path)
             await session.start()
@@ -384,122 +463,11 @@ class NotebookWorkspace:
         """Close and delete a path while preventing it from being reopened."""
         try:
             await self.close(path)
-            if self._config.mode == "local":
-                return self._delete_local_file(path)
-            return await self._delete_server_file(path)
+            return await self._file_backend.delete_notebook(path)
         finally:
             async with self._registry_lock:
                 if self._deleting.get(path) is asyncio.current_task():
                     self._deleting.pop(path, None)
-
-    def _list_local_files(self, directory: str, recursive: bool) -> list[dict[str, Any]]:
-        """Scan the local filesystem for ``.ipynb`` files."""
-        root = Path(directory).resolve()
-        if not root.is_dir():
-            return []
-
-        pattern = "**/*.ipynb" if recursive else "*.ipynb"
-        results = []
-        for p in sorted(root.glob(pattern)):
-            rel = str(p.relative_to(Path.cwd())) if p.is_relative_to(Path.cwd()) else str(p)
-            results.append(
-                {
-                    "path": rel,
-                    "name": p.name,
-                    "is_open": str(p.resolve()) in self._sessions or rel in self._sessions,
-                }
-            )
-        return results
-
-    async def _list_server_files(self, directory: str, recursive: bool) -> list[dict[str, Any]]:
-        """List notebooks from a Jupyter server via the Contents API."""
-        import aiohttp
-
-        cfg = self._config
-        if not cfg.base_url:
-            raise RuntimeError("base_url is required in server mode")
-        base_url = cfg.base_url.rstrip("/")
-        headers: dict[str, str] = dict(cfg.headers or {})
-        if cfg.token:
-            headers["Authorization"] = f"Token {cfg.token}"
-
-        # Normalise directory path for the Contents API
-        api_path = directory.strip("/") if directory != "." else ""
-        url = f"{base_url}/api/contents/{api_path}"
-
-        results: list[dict[str, Any]] = []
-        async with aiohttp.ClientSession(headers=headers) as session:
-            await self._fetch_contents(session, url, results, recursive)
-        return results
-
-    async def _fetch_contents(
-        self,
-        session: Any,
-        url: str,
-        results: list[dict[str, Any]],
-        recursive: bool,
-    ) -> None:
-        """Recursively fetch notebook entries from the Contents API."""
-        async with session.get(url, params={"content": "1"}) as resp:
-            if resp.status != 200:
-                log.warning("Contents API returned %s for %s", resp.status, url)
-                return
-            data = await resp.json()
-
-        if data.get("type") == "directory":
-            for item in data.get("content", []):
-                if item["type"] == "notebook":
-                    nb_path = item["path"]
-                    results.append(
-                        {
-                            "path": nb_path,
-                            "name": item["name"],
-                            "is_open": nb_path in self._sessions,
-                        }
-                    )
-                elif item["type"] == "directory" and recursive:
-                    sub_url = url.rsplit("/api/contents/", 1)[0]
-                    sub_url = f"{sub_url}/api/contents/{item['path']}"
-                    await self._fetch_contents(session, sub_url, results, recursive)
-
-    def _delete_local_file(self, path: str) -> bool:
-        """Remove a notebook file from the local filesystem."""
-        nb_path = Path(path).resolve()
-        if not nb_path.exists():
-            log.debug("Local notebook already absent: %s", nb_path)
-            return True
-        try:
-            nb_path.unlink()
-            log.info("Deleted local notebook: %s", nb_path)
-            return True
-        except Exception as exc:
-            raise RuntimeError(f"Failed to delete {nb_path}: {exc}") from exc
-
-    async def _delete_server_file(self, path: str) -> bool:
-        """Remove a notebook file via the Jupyter Contents API."""
-        from urllib.parse import quote
-
-        import aiohttp
-
-        cfg = self._config
-        if not cfg.base_url:
-            raise RuntimeError("base_url is required in server mode")
-        base_url = cfg.base_url.rstrip("/")
-        headers: dict[str, str] = dict(cfg.headers or {})
-        if cfg.token:
-            headers["Authorization"] = f"Token {cfg.token}"
-
-        url = f"{base_url}/api/contents/{quote(path, safe='')}"
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.delete(url) as resp:
-                if resp.status == 204:
-                    log.info("Deleted server notebook: %s", path)
-                    return True
-                if resp.status == 404:
-                    log.debug("Server notebook already absent: %s", path)
-                    return True
-                text = await resp.text()
-                raise RuntimeError(f"Failed to delete notebook {path} (HTTP {resp.status}): {text}")
 
     def _build_session(self, notebook_path: str) -> NotebookSession:
         """Build an uninitialised session for the given notebook path."""

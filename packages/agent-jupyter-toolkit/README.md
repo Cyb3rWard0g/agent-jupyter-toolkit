@@ -196,6 +196,7 @@ agent_jupyter_toolkit
 ├── notebook/
 │   ├── session.py          # NotebookSession (kernel + document orchestration)
 │   ├── workspace.py        # Multi-notebook registry, default selection, lifecycle
+│   ├── _workspace_files.py # Private local and Contents API file operations
 │   ├── transport.py        # NotebookDocumentTransport protocol
 │   ├── factory.py          # make_document_transport() factory
 │   ├── buffer.py           # In-memory NotebookBuffer

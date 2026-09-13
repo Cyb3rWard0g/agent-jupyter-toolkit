@@ -102,6 +102,10 @@ Discover `.ipynb` files available for opening. In local mode scans the filesyste
 
 **Returns:** `ok`, `directory`, `recursive`, `notebooks` (list with `path`, `name`, `is_open`)
 
+Remote directory paths are encoded for the Jupyter Contents API. Authentication,
+permission, and other non-success responses return `ok: false` with the server
+error instead of appearing as an empty directory.
+
 **Example prompt:** *"What notebooks are in this project?"*
 
 ---

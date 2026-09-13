@@ -58,6 +58,7 @@ packages/agent-jupyter-toolkit/src/agent_jupyter_toolkit/
 │   ├── transport.py                # NotebookDocumentTransport protocol
 │   ├── session.py                  # NotebookSession (kernel + document orchestration)
 │   ├── workspace.py                # NotebookWorkspace registry, defaults, and lifecycle
+│   ├── _workspace_files.py         # Local and Contents API workspace file operations
 │   ├── factory.py                  # make_document_transport() factory
 │   ├── buffer.py                   # NotebookBuffer (in-memory staged edits)
 │   ├── cells.py                    # create_code_cell(), create_markdown_cell()
@@ -168,6 +169,11 @@ assert isinstance(MyCustomTransport(), NotebookDocumentTransport)  # True
 settings independently of any agent framework. The workspace owns path lookup,
 default selection, session creation, file discovery/deletion, and the concurrent
 open/close/delete/shutdown barriers.
+
+File creation, discovery, deletion, Contents URL encoding, and HTTP error handling
+are delegated to private local/server backends in `_workspace_files.py`. This keeps
+the registry focused on session state and gives both storage modes the same small
+interface.
 
 The MCP package's `context.SessionManager` is a compatibility adapter: it converts
 MCP configuration into `NotebookWorkspaceConfig` and inherits the core behavior.

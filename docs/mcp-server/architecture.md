@@ -92,6 +92,12 @@ delete operations install per-path barriers before transport shutdown starts,
 so another open cannot attach to a server kernel during teardown or recreate a
 session before file deletion completes.
 
+Workspace shutdown runs as a retained drain task. If its caller is cancelled,
+the workspace closes every captured session before delivering that cancellation;
+concurrent callers await the same shutdown. Local and Contents API file operations
+live behind private workspace file backends. The server backend encodes directory
+paths and propagates failed HTTP responses to MCP tool results.
+
 The workspace remembers one default notebook. Opening another notebook does not
 switch an existing default unless `set_default=True`; supplying an execution
 path overrides the target only for that call. Path normalization also applies

@@ -436,10 +436,10 @@ These settings describe the Jupyter backend, independently of any MCP transport.
 | `is_default(path)` | Compare a path with the default using the same normalization as lookup |
 | `default_path`, `paths`, `len(workspace)` | Read the default, open paths, and session count |
 | `list_sessions()` | Summarize open notebooks, their default status, and document transports |
-| `await list_notebook_files(directory=".", recursive=False)` | Discover notebook files through the filesystem or Jupyter Contents API |
+| `await list_notebook_files(directory=".", recursive=False)` | Discover notebook files; remote paths are URL-encoded and Jupyter errors are propagated |
 | `await close(path)` | Remove and stop a session; if it was default, select the first remaining open notebook |
 | `await delete(path)` | Close a session and delete its notebook file |
-| `await close_all()` | Reject new opens and close the workspace's sessions |
+| `await close_all()` | Reject new opens/deletes and drain every session before propagating caller cancellation |
 
 Local paths resolve against the process working directory and become absolute;
 server paths have leading/trailing slashes removed. Setting `default_path`

@@ -755,6 +755,21 @@ async def test_notebook_files_list(mock_ctx):
 
 
 @pytest.mark.asyncio
+async def test_notebook_files_list_reports_remote_errors(mock_ctx):
+    """A failed Contents request must not look like a successful empty directory."""
+    mock_ctx.request_context.lifespan_context.manager.list_notebook_files = AsyncMock(
+        side_effect=RuntimeError("GET contents failed (403): permission denied")
+    )
+    server = FastMCP("test")
+    register_notebook_tools(server)
+
+    tool = server._tool_manager._tools["notebook_files_list"]
+    result = await tool.fn(ctx=mock_ctx, directory="restricted", recursive=False)
+
+    assert result == {"ok": False, "error": "GET contents failed (403): permission denied"}
+
+
+@pytest.mark.asyncio
 async def test_notebook_packages_uninstall(mock_ctx):
     """Test notebook_packages_uninstall tool calls session.uninstall_packages."""
     mock_report = {

@@ -8,7 +8,47 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import agent_jupyter_toolkit.notebook._workspace_files as workspace_files
 from agent_jupyter_toolkit.notebook import NotebookWorkspace, NotebookWorkspaceConfig
+
+
+class FakeResponse:
+    def __init__(self, status, *, data=None, text=""):
+        self.status = status
+        self._data = data
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def json(self):
+        return self._data
+
+    async def text(self):
+        return self._text
+
+
+class FakeClientSession:
+    def __init__(self, responses):
+        self.responses = responses
+        self.requests = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    def get(self, url, *, params):
+        self.requests.append(("GET", url, params))
+        return self.responses[("GET", url)]
+
+    def delete(self, url):
+        self.requests.append(("DELETE", url, None))
+        return self.responses[("DELETE", url)]
 
 
 @pytest.fixture
@@ -301,7 +341,7 @@ async def test_open_waits_until_delete_finishes(monkeypatch):
         return True
 
     monkeypatch.setattr(manager, "_build_session", build)
-    monkeypatch.setattr(manager, "_delete_server_file", delete_file)
+    monkeypatch.setattr(manager._file_backend, "delete_notebook", delete_file)
     await manager.open("delete-race.ipynb")
     deleting = asyncio.create_task(manager.delete("delete-race.ipynb"))
     await stop_started.wait()
@@ -365,3 +405,177 @@ async def test_close_all_rejects_reopen_waiting_on_teardown(monkeypatch):
     assert len(manager) == 0
     with pytest.raises(RuntimeError, match="shutting down"):
         await manager.open("after-shutdown.ipynb")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_all_drains_every_session_before_propagating(monkeypatch):
+    manager = NotebookWorkspace(NotebookWorkspaceConfig(mode="server"))
+    stop_started = asyncio.Event()
+    finish_stop = asyncio.Event()
+    sessions = {}
+
+    class StubSession:
+        def __init__(self, path):
+            self.path = path
+            self.stop_calls = 0
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            self.stop_calls += 1
+            if self.path == "first.ipynb":
+                stop_started.set()
+                await finish_stop.wait()
+
+    def build(path):
+        session = StubSession(path)
+        sessions[path] = session
+        return session
+
+    monkeypatch.setattr(manager, "_build_session", build)
+    await manager.open("first.ipynb")
+    await manager.open("second.ipynb")
+    shutdown = asyncio.create_task(manager.close_all())
+    await stop_started.wait()
+
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    concurrent_shutdown = asyncio.create_task(manager.close_all())
+    finish_stop.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+    await concurrent_shutdown
+    assert sessions["first.ipynb"].stop_calls == 1
+    assert sessions["second.ipynb"].stop_calls == 1
+    assert len(manager) == 0
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await manager.delete("after-shutdown.ipynb")
+
+
+@pytest.mark.asyncio
+async def test_close_all_waits_for_and_reports_inflight_delete_failure(monkeypatch):
+    manager = NotebookWorkspace(NotebookWorkspaceConfig(mode="server"))
+    delete_started = asyncio.Event()
+    finish_delete = asyncio.Event()
+
+    async def failing_delete(_path):
+        delete_started.set()
+        await finish_delete.wait()
+        raise RuntimeError("remote delete failed")
+
+    monkeypatch.setattr(manager._file_backend, "delete_notebook", failing_delete)
+    deleting = asyncio.create_task(manager.delete("failed-delete.ipynb"))
+    await delete_started.wait()
+    shutdown = asyncio.create_task(manager.close_all())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+
+    finish_delete.set()
+    with pytest.raises(RuntimeError, match="remote delete failed"):
+        await shutdown
+    with pytest.raises(RuntimeError, match="remote delete failed"):
+        await deleting
+    assert len(manager) == 0
+
+
+@pytest.mark.asyncio
+async def test_server_listing_encodes_initial_and_recursive_directory_paths(monkeypatch):
+    manager = NotebookWorkspace(
+        NotebookWorkspaceConfig(mode="server", base_url="https://jupyter.example.test/base")
+    )
+    first_url = "https://jupyter.example.test/base/api/contents/project%20%231"
+    nested_url = "https://jupyter.example.test/base/api/contents/project%20%231/nested%20%3F"
+    responses = {
+        ("GET", first_url): FakeResponse(
+            200,
+            data={
+                "type": "directory",
+                "content": [
+                    {
+                        "type": "notebook",
+                        "path": "project #1/top %.ipynb",
+                        "name": "top %.ipynb",
+                    },
+                    {
+                        "type": "directory",
+                        "path": "project #1/nested ?",
+                        "name": "nested ?",
+                    },
+                ],
+            },
+        ),
+        ("GET", nested_url): FakeResponse(
+            200,
+            data={
+                "type": "directory",
+                "content": [
+                    {
+                        "type": "notebook",
+                        "path": "project #1/nested ?/analysis.ipynb",
+                        "name": "analysis.ipynb",
+                    }
+                ],
+            },
+        ),
+    }
+    client = FakeClientSession(responses)
+    monkeypatch.setattr(workspace_files.aiohttp, "ClientSession", lambda **kwargs: client)
+
+    notebooks = await manager.list_notebook_files("/project #1/", recursive=True)
+
+    assert [request[1] for request in client.requests] == [first_url, nested_url]
+    assert [notebook["path"] for notebook in notebooks] == [
+        "project #1/top %.ipynb",
+        "project #1/nested ?/analysis.ipynb",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_server_listing_propagates_contents_api_errors(monkeypatch):
+    manager = NotebookWorkspace(
+        NotebookWorkspaceConfig(mode="server", base_url="https://jupyter.example.test")
+    )
+    url = "https://jupyter.example.test/api/contents/restricted"
+    client = FakeClientSession({("GET", url): FakeResponse(403, text="permission denied")})
+    monkeypatch.setattr(workspace_files.aiohttp, "ClientSession", lambda **kwargs: client)
+
+    with pytest.raises(RuntimeError, match=r"GET .* failed \(403\): permission denied"):
+        await manager.list_notebook_files("restricted")
+
+
+@pytest.mark.asyncio
+async def test_server_delete_uses_encoded_contents_path(monkeypatch):
+    manager = NotebookWorkspace(
+        NotebookWorkspaceConfig(mode="server", base_url="https://jupyter.example.test/base")
+    )
+    url = "https://jupyter.example.test/base/api/contents/project%20%231/report%3F.ipynb"
+    client = FakeClientSession({("DELETE", url): FakeResponse(204)})
+    monkeypatch.setattr(workspace_files.aiohttp, "ClientSession", lambda **kwargs: client)
+
+    assert await manager.delete("/project #1/report?.ipynb/") is True
+    assert client.requests == [("DELETE", url, None)]
+
+
+@pytest.mark.asyncio
+async def test_local_workspace_creates_lists_and_deletes_notebook(tmp_path, monkeypatch):
+    manager = NotebookWorkspace()
+    notebook_path = tmp_path / "local workspace.ipynb"
+    session = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), doc=SimpleNamespace())
+    monkeypatch.setattr(manager, "_build_session", lambda path: session)
+
+    await manager.open(str(notebook_path))
+    notebooks = await manager.list_notebook_files(str(tmp_path))
+
+    assert notebooks == [
+        {
+            "path": str(notebook_path),
+            "name": notebook_path.name,
+            "is_open": True,
+        }
+    ]
+    assert await manager.delete(str(notebook_path)) is True
+    assert not notebook_path.exists()
+    session.stop.assert_awaited_once()
