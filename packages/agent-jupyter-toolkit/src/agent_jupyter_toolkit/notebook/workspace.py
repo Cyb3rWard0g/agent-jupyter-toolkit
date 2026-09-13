@@ -301,7 +301,7 @@ class NotebookWorkspace:
     async def _wait_for_shutdown(task: asyncio.Task[None]) -> None:
         """Delay caller cancellation until the retained shutdown task has drained."""
         current = asyncio.current_task()
-        cancellation_requests = 0
+        caller_cancelled = False
         shutdown_error: BaseException | None = None
 
         while not task.done():
@@ -312,7 +312,7 @@ class NotebookWorkspace:
                     raise
                 while current.cancelling():
                     current.uncancel()
-                    cancellation_requests += 1
+                    caller_cancelled = True
                 if task.cancelled():
                     shutdown_error = exc
                     break
@@ -326,7 +326,7 @@ class NotebookWorkspace:
             except BaseException as exc:
                 shutdown_error = exc
 
-        if cancellation_requests:
+        if caller_cancelled:
             if shutdown_error is not None:
                 log.error(
                     "Workspace shutdown failed while its caller was cancelled",
@@ -336,9 +336,10 @@ class NotebookWorkspace:
                         shutdown_error.__traceback__,
                     ),
                 )
-            assert current is not None
-            for _ in range(cancellation_requests):
-                current.cancel()
+            # The caught cancellation requests have already been consumed and
+            # removed with uncancel(). Re-scheduling them before raising here
+            # leaves a pending cancellation behind on Python 3.11 and 3.12,
+            # which then appears unexpectedly at the caller's next await.
             raise asyncio.CancelledError() from shutdown_error
 
         if shutdown_error is not None:

@@ -24,7 +24,7 @@ classifiers = [
 keywords = ["Jupyter", "MCP", "agents", "notebooks", "model-context-protocol"]
 
 dependencies = [
-  "agent-jupyter-toolkit",
+  "agent-jupyter-toolkit>=0.8.0",
   "mcp>=1.26.0,<3",
 ]
 
@@ -33,7 +33,7 @@ mcp-jupyter-notebook = "mcp_jupyter_notebook:main"
 
 [project.optional-dependencies]
 dataframe = [
-  "agent-jupyter-toolkit[dataframe]",
+  "agent-jupyter-toolkit[dataframe]>=0.8.0",
 ]
 
 postgres = [

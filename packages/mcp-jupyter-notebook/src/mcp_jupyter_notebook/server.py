@@ -195,14 +195,15 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 
     manager = SessionManager(config=cfg, default_path=None)
 
-    # Auto-open the default notebook so single-notebook usage works unchanged
-    if default_path:
-        log.info("Opening default notebook: %s", default_path)
-        await manager.open(default_path)
-    else:
-        log.info("No default notebook configured; agents must use notebook_open.")
-
     try:
+        # Keep startup inside the cleanup boundary. manager.open() shields its
+        # shared startup task, so cancellation must drain it before returning.
+        if default_path:
+            log.info("Opening default notebook: %s", default_path)
+            await manager.open(default_path)
+        else:
+            log.info("No default notebook configured; agents must use notebook_open.")
+
         yield AppContext(manager=manager)
     finally:
         log.info("Shutting down SessionManager (%d sessions)…", len(manager))

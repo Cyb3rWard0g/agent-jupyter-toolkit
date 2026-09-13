@@ -436,7 +436,19 @@ async def test_cancelled_close_all_drains_every_session_before_propagating(monke
     monkeypatch.setattr(manager, "_build_session", build)
     await manager.open("first.ipynb")
     await manager.open("second.ipynb")
-    shutdown = asyncio.create_task(manager.close_all())
+    cancellation_delivered = asyncio.Event()
+    continued_after_cancellation = asyncio.Event()
+
+    async def cancelled_caller():
+        try:
+            await manager.close_all()
+        except asyncio.CancelledError:
+            cancellation_delivered.set()
+        # A consumed cancellation must not reappear at the caller's next await.
+        await asyncio.sleep(0)
+        continued_after_cancellation.set()
+
+    shutdown = asyncio.create_task(cancelled_caller())
     await stop_started.wait()
 
     shutdown.cancel()
@@ -445,9 +457,10 @@ async def test_cancelled_close_all_drains_every_session_before_propagating(monke
     concurrent_shutdown = asyncio.create_task(manager.close_all())
     finish_stop.set()
 
-    with pytest.raises(asyncio.CancelledError):
-        await shutdown
+    await shutdown
     await concurrent_shutdown
+    assert cancellation_delivered.is_set()
+    assert continued_after_cancellation.is_set()
     assert sessions["first.ipynb"].stop_calls == 1
     assert sessions["second.ipynb"].stop_calls == 1
     assert len(manager) == 0

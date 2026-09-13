@@ -2,8 +2,9 @@
 Unit tests for server.py utilities and entrypoints.
 """
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import create_autospec
+from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 
@@ -92,6 +93,44 @@ def test_unknown_collaboration_mode_is_rejected(monkeypatch):
     monkeypatch.setenv("MCP_JUPYTER_COLLABORATION_MODE", "sometimes")
     with pytest.raises(ValueError, match="collaboration mode"):
         process_config(_config_args())
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lifespan_startup_drains_opening_session(monkeypatch):
+    """Cancelling default startup must not leave its shared open task running."""
+    import mcp_jupyter_notebook.server as server
+    from mcp_jupyter_notebook.context import SessionManager
+
+    started = asyncio.Event()
+    finish_start = asyncio.Event()
+
+    async def slow_start():
+        started.set()
+        await finish_start.wait()
+
+    session = SimpleNamespace(start=AsyncMock(side_effect=slow_start), stop=AsyncMock())
+    manager = SessionManager({"mode": "server"})
+    monkeypatch.setattr(manager, "_build_session", lambda _path: session)
+    monkeypatch.setattr(
+        server,
+        "_server_config",
+        {"mode": "server", "notebook_path": "startup.ipynb"},
+    )
+    monkeypatch.setattr(server, "SessionManager", lambda **_kwargs: manager)
+
+    lifespan = server.app_lifespan(None)
+    entering = asyncio.create_task(lifespan.__aenter__())
+    await started.wait()
+    entering.cancel()
+    await asyncio.sleep(0)
+    assert not entering.done()
+    finish_start.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await entering
+    session.stop.assert_awaited_once()
+    assert len(manager) == 0
+    assert manager._shutting_down is True
 
 
 @pytest.mark.asyncio

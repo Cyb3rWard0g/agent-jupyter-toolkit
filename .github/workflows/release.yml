@@ -88,10 +88,53 @@ jobs:
         working-directory: packages/mcp-jupyter-notebook
         run: uv run pytest --tb=short -q
 
+  verify-artifacts:
+    name: Verify built package pair
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download toolkit artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-toolkit
+          path: dist/toolkit/
+
+      - name: Download MCP artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-mcp
+          path: dist/mcp/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install built wheels together
+        run: python -m pip install dist/toolkit/*.whl dist/mcp/*.whl
+
+      - name: Verify versions and workspace imports
+        env:
+          EXPECTED_VERSION: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          from importlib.metadata import version
+
+          from agent_jupyter_toolkit.notebook import NotebookWorkspace
+          from mcp_jupyter_notebook.context import SessionManager
+
+          expected = os.environ["EXPECTED_VERSION"].removeprefix("v")
+          assert version("agent-jupyter-toolkit") == expected
+          assert version("mcp-jupyter-notebook") == expected
+          assert NotebookWorkspace.__name__ == "NotebookWorkspace"
+          assert SessionManager.__name__ == "SessionManager"
+          PY
+
   # ── Publish agent-jupyter-toolkit to PyPI ────────────
   publish-toolkit:
     name: Publish agent-jupyter-toolkit
-    needs: [build, test]
+    needs: [build, test, verify-artifacts]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -113,7 +156,7 @@ jobs:
   # ── Publish mcp-jupyter-notebook to PyPI ─────────────
   publish-mcp:
     name: Publish mcp-jupyter-notebook
-    needs: [build, test]
+    needs: [build, test, publish-toolkit]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -124,6 +167,29 @@ jobs:
         with:
           name: dist-mcp
           path: dist/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Wait for the toolkit release to become installable
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for attempt in {1..30}; do
+            if python -m pip download \
+              --disable-pip-version-check \
+              --no-deps \
+              --only-binary=:all: \
+              --dest "$RUNNER_TEMP/toolkit-release" \
+              "agent-jupyter-toolkit==$version"; then
+              exit 0
+            fi
+            echo "Toolkit $version is not available yet (attempt $attempt/30)."
+            sleep 10
+          done
+          exit 1
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

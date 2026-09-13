@@ -171,10 +171,11 @@ git push origin vX.Y.Z
 This triggers the `release.yml` workflow which:
 1. Builds both packages (`python -m build`)
 2. Runs the full test matrix (Python 3.11–3.13)
-3. Publishes `agent-jupyter-toolkit` to PyPI (via OIDC trusted publishing)
-4. Publishes `mcp-jupyter-notebook` to PyPI (via OIDC trusted publishing)
-5. Creates a GitHub Release with auto-generated notes and attached artifacts
-6. Builds and pushes a Docker image to GHCR (`ghcr.io/cyb3rward0g/mcp-jupyter-notebook`)
+3. Installs the built wheel pair and verifies their versions and workspace APIs
+4. Publishes `agent-jupyter-toolkit` to PyPI (via OIDC trusted publishing)
+5. Waits until that toolkit version is installable, then publishes `mcp-jupyter-notebook`
+6. Creates a GitHub Release with auto-generated notes and attached artifacts
+7. Builds and pushes a Docker image to GHCR (`ghcr.io/cyb3rward0g/mcp-jupyter-notebook`)
 
 ### Manual Release (fallback)
 
