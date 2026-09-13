@@ -11,6 +11,7 @@ from agent_jupyter_toolkit.kernel import (
     UnsupportedKernelCapabilityError,
     create_session,
 )
+from agent_jupyter_toolkit.kernel.callbacks import OutputCallbackDispatcher
 from agent_jupyter_toolkit.kernel.execution_state import ExecutionState
 from agent_jupyter_toolkit.kernel.messages import fold_iopub_events
 from agent_jupyter_toolkit.kernel.transports.local import LocalTransport
@@ -377,30 +378,39 @@ async def test_server_routes_control_reply_while_execution_lock_is_held():
     assert result["success"] is True
 
 
-async def test_server_unregisters_execution_before_waiting_for_final_callback():
+@pytest.mark.parametrize("callback_before_idle", [False, True])
+async def test_server_unregisters_execution_before_waiting_for_final_callback(
+    monkeypatch, callback_before_idle
+):
     transport = ServerTransport(ServerConfig(base_url="http://unused", output_callback_timeout=1.0))
     transport._session = SimpleNamespace()
     transport._kernel_id = "kernel-1"
     transport._supported_features = {"debugger"}
+    sent_requests = asyncio.Queue()
     transport._ws = SimpleNamespace(
         closed=False,
-        send_json=AsyncMock(),
+        send_json=AsyncMock(side_effect=sent_requests.put),
         send_bytes=AsyncMock(),
     )
     callback_started = asyncio.Event()
+    finalization_started = asyncio.Event()
     release_callback = asyncio.Event()
+    original_finish = OutputCallbackDispatcher.finish
+
+    async def finish(dispatcher):
+        finalization_started.set()
+        return await original_finish(dispatcher)
+
+    monkeypatch.setattr(OutputCallbackDispatcher, "finish", finish)
 
     async def callback(*_args):
         callback_started.set()
         await release_callback.wait()
 
     execution = asyncio.create_task(transport.execute("pass", output_callback=callback))
+    debug = None
     try:
-        for _ in range(10):
-            if transport._ws.send_json.await_count:
-                break
-            await asyncio.sleep(0)
-        execute_request = transport._ws.send_json.await_args.args[0]
+        execute_request = await asyncio.wait_for(sent_requests.get(), 1)
         request_id = execute_request["header"]["msg_id"]
         for msg_type, content in (
             ("execute_reply", {"status": "ok"}),
@@ -413,8 +423,16 @@ async def test_server_unregisters_execution_before_waiting_for_final_callback():
                     "content": content,
                 }
             )
-        await callback_started.wait()
+            if callback_before_idle and msg_type == "execute_reply":
+                # Streaming callbacks may start before execution has settled.
+                await asyncio.wait_for(callback_started.wait(), 1)
+                assert request_id in transport._request_queues
+                assert not finalization_started.is_set()
+
+        await asyncio.wait_for(finalization_started.wait(), 1)
+        await asyncio.wait_for(callback_started.wait(), 1)
         assert request_id not in transport._request_queues
+        assert not execution.done()
 
         async def dispatch_late_output():
             for _ in range(33):
@@ -426,16 +444,12 @@ async def test_server_unregisters_execution_before_waiting_for_final_callback():
                     }
                 )
 
-        await asyncio.wait_for(dispatch_late_output(), 0.1)
+        await asyncio.wait_for(dispatch_late_output(), 1)
 
         debug = asyncio.create_task(
             transport.debug({"seq": 1, "type": "request", "command": "debugInfo"})
         )
-        for _ in range(10):
-            if transport._ws.send_json.await_count >= 2:
-                break
-            await asyncio.sleep(0)
-        debug_request = transport._ws.send_json.await_args.args[0]
+        debug_request = await asyncio.wait_for(sent_requests.get(), 1)
         await transport._dispatch_frame(
             {
                 "header": {"msg_type": "debug_reply"},
@@ -443,8 +457,14 @@ async def test_server_unregisters_execution_before_waiting_for_final_callback():
                 "content": {"success": True},
             }
         )
-        assert (await asyncio.wait_for(debug, 0.1))["success"] is True
+        assert (await asyncio.wait_for(debug, 1))["success"] is True
     finally:
         release_callback.set()
+        if debug is not None:
+            if not debug.done():
+                debug.cancel()
+            await asyncio.gather(debug, return_exceptions=True)
+        result = await asyncio.wait_for(execution, 1)
 
-    assert (await execution).status == "ok"
+    assert result.status == "ok"
+    assert result.callback_status == "ok"
