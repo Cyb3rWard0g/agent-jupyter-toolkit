@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
+
+from mcp_jupyter_notebook._mcp import Context, FastMCP
 
 from .common import (
     cell_id_map_for_indices,
+    code_result,
     enriched_code_result,
     get_session,
     run_all_result,
@@ -85,10 +87,16 @@ def register_execution_tools(
         ctx: Context,
         notebook_path: str | None = None,
         timeout: float = 120.0,
+        subshell_id: str | None = None,
     ) -> dict[str, Any]:
         """Execute code directly in the kernel without creating a notebook cell."""
         session = get_session(ctx, notebook_path)
-        result = await execute_code_fn(session.kernel, code, timeout=timeout)
+        result = await execute_code_fn(
+            session.kernel,
+            code,
+            timeout=timeout,
+            subshell_id=subshell_id,
+        )
         return {
             "ok": result.status == "ok",
             "status": result.status,
@@ -99,6 +107,17 @@ def register_execution_tools(
             "formatted_output": result.formatted_output,
             "error_message": result.error_message,
             "elapsed_seconds": result.elapsed_seconds,
+            "persistence_status": result.persistence_status,
+            "persistence_error": result.persistence_error,
+            "request_id": result.request_id,
+            "kernel_generation": result.kernel_generation,
+            "output_truncated": result.output_truncated,
+            "dropped_output_bytes": result.dropped_output_bytes,
+            "callback_snapshots_coalesced": result.callback_snapshots_coalesced,
+            "callback_status": result.callback_status,
+            "callback_error": result.callback_error,
+            "outcome": result.outcome,
+            "timed_out": result.timed_out,
         }
 
     @mcp.tool(
@@ -140,16 +159,9 @@ def register_execution_tools(
                 "elapsed_seconds": result.elapsed_seconds,
             }
             if hasattr(result, "stdout"):
-                entry.update(
-                    {
-                        "execution_count": result.execution_count,
-                        "stdout": result.stdout,
-                        "stderr": result.stderr,
-                        "outputs": result.outputs,
-                        "text_outputs": result.text_outputs,
-                        "formatted_output": result.formatted_output,
-                    }
-                )
+                entry.update(code_result(result))
+                if entry["cell_id"] is None:
+                    entry["cell_id"] = cell_id_map.get(result.cell_index)
             out.append(entry)
         return out
 

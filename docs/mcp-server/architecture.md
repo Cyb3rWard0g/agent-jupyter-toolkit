@@ -10,13 +10,14 @@ This document describes the internal structure of the MCP Jupyter Notebook serve
 ┌─────────────┐    stdio/SSE/HTTP    ┌──────────────────────┐
 │  MCP Client │◄────────────────────►│  FastMCP Server      │
 │  (VS Code,  │                      │  ├─ lifespan         │
-│   Cursor,   │                      │  ├─ 27 tools         │
+│   Cursor,   │                      │  ├─ notebook tools   │
 │   Claude)   │                      │  └─ AppContext        │
 └─────────────┘                      └──────────┬───────────┘
                                                 │
                                      ┌──────────▼───────────┐
                                      │  agent-jupyter-      │
                                      │  toolkit              │
+                                     │  ├─ Workspace        │
                                      │  ├─ Kernel (WS)      │
                                      │  └─ Doc (Yjs/REST)   │
                                      └──────────┬───────────┘
@@ -50,15 +51,15 @@ mcp-jupyter-notebook = "mcp_jupyter_notebook:main"
 
 ### `server.py` — Server Core
 
-Contains the FastMCP server creation, configuration processing, session construction, and the lifespan context manager.
+Contains FastMCP server creation, configuration processing, and the lifespan
+context manager. Notebook construction and lifecycle live in the core toolkit.
 
 **Key functions:**
 
 | Function | Purpose |
 |---|---|
 | `process_config(args)` | Merges CLI args with env vars (CLI wins). Returns a flat config dict. |
-| `_build_session(cfg)` | Constructs a `NotebookSession` from the config — creates kernel and doc transports based on the session mode. |
-| `app_lifespan(server)` | Async context manager that starts the `NotebookSession`, yields an `AppContext`, and cleans up on shutdown. |
+| `app_lifespan(server)` | Creates the `SessionManager`, opens the optional default notebook, yields an `AppContext`, and closes every session on shutdown. |
 | `create_server()` | Creates the `FastMCP` instance, attaches the lifespan, and registers all tools. |
 | `run_server(cfg)` | Async entry point — sets the global config and runs the server with the configured transport. |
 
@@ -66,23 +67,53 @@ Contains the FastMCP server creation, configuration processing, session construc
 
 ### `context.py` — Shared State
 
-A simple `@dataclass` that holds the `NotebookSession`. This is yielded by the lifespan and available to all tools via the MCP `Context`:
+`AppContext` holds a core `NotebookWorkspace`. The `SessionManager` compatibility
+adapter subclasses it and translates the existing MCP configuration dictionary
+into a `NotebookWorkspaceConfig`. Registry and lifecycle behavior live in
+`agent_jupyter_toolkit.notebook.workspace`.
+It is yielded by the lifespan and available to all tools through the MCP
+`Context`:
 
 ```python
 @dataclass
 class AppContext:
-    session: NotebookSession
+    manager: NotebookWorkspace
 ```
 
 Tools access it as:
 
 ```python
-session = ctx.request_context.lifespan_context.session
+manager = ctx.request_context.lifespan_context.manager
+session = manager.get(notebook_path)
 ```
 
-### `tools.py` — Tool Definitions
+The manager shares concurrent opens for the same canonical path. Close and
+delete operations install per-path barriers before transport shutdown starts,
+so another open cannot attach to a server kernel during teardown or recreate a
+session before file deletion completes.
 
-All 27 MCP tools are registered inside `register_notebook_tools(mcp)`. Each tool is a decorated async function with `ToolAnnotations` describing its behavior:
+Workspace shutdown runs as a retained drain task. If its caller is cancelled,
+the workspace closes every captured session before delivering that cancellation;
+concurrent callers await the same shutdown. Local and Contents API file operations
+live behind private workspace file backends. The server backend encodes directory
+paths and propagates failed HTTP responses to MCP tool results.
+
+The workspace remembers one default notebook. Opening another notebook does not
+switch an existing default unless `set_default=True`; supplying an execution
+path overrides the target only for that call. Path normalization also applies
+to default selection. Closing the default selects a remaining notebook as soon
+as the closing session leaves the registry, before slow transport cleanup.
+
+These defaults are shared by callers using the same workspace. There is no
+automatic per-conversation scope. The workspace runs inside the MCP server
+process, whether that server is local or remote; clients need no extra SDK or
+session-ID argument.
+
+### Tool Definitions
+
+All 43 core MCP tools are registered through `register_notebook_tools(mcp)`.
+Each tool is a decorated async function with `ToolAnnotations` describing its
+behavior:
 
 ```python
 from mcp.types import ToolAnnotations
@@ -118,7 +149,7 @@ Helper functions:
 
 1. **MCP client** sends a tool call (e.g. `notebook_code_run` with `code` parameter)
 2. **FastMCP** routes the call to the registered tool function
-3. **Tool function** extracts the `NotebookSession` from the lifespan context
+3. **Tool function** asks the core workspace in the lifespan context to resolve the explicit notebook path or current default
 4. **agent-jupyter-toolkit** executes the operation:
    - **Kernel transport** sends an `execute_request` over WebSocket to the Jupyter kernel
    - **Doc transport** syncs the notebook document (adds/removes cells) via Yjs or REST
@@ -129,17 +160,22 @@ Helper functions:
 
 ## Session Construction
 
-The `_build_session()` function creates two transports based on the session mode:
+The core `NotebookWorkspace._build_session()` method creates two transports
+based on the session mode:
 
 ### Server Mode
 
 ```python
-kernel = create_kernel("remote", base_url=..., token=..., kernel_name=...)
-doc = create_notebook_transport("remote", notebook_path, base_url=..., token=..., prefer_collab=True)
+kernel = create_kernel(
+    "remote", base_url=..., token=..., kernel_name=..., notebook_path=notebook_path
+)
+doc = create_notebook_transport(
+    "remote", notebook_path, base_url=..., token=..., collaboration_mode="preferred"
+)
 ```
 
-- **Kernel:** Connects to the Jupyter REST API to create a kernel, then opens a WebSocket for execution
-- **Document:** If `prefer_collab=True`, connects via Yjs WebSocket for real-time sync; otherwise uses the Contents REST API
+- **Kernel:** Reuses or creates the Jupyter Sessions API kernel bound to the same notebook path, then opens its WebSocket channels
+- **Document:** Uses required/preferred/disabled collaboration policy. Preferred mode falls back only for classified unsupported API responses and reports the result.
 
 ### Local Mode
 
@@ -151,27 +187,36 @@ doc = create_notebook_transport("local", notebook_path, prefer_collab=False)
 - **Kernel:** Launches a local kernel process via `jupyter_client`
 - **Document:** Reads/writes the `.ipynb` file directly on the filesystem
 
+`SessionManager.open()` canonicalizes paths and shares one in-flight startup
+task for concurrent requests targeting the same notebook. The session enters
+the registry only after both transports start successfully; failed starts clean
+up partial resources and remain retryable. Open requests also wait for any
+in-flight close or delete of the same path, preventing reuse of a kernel during
+teardown and file deletion.
+
 ---
 
 ## Lifespan Management
 
-The server uses FastMCP's lifespan pattern to manage the `NotebookSession`:
+The server uses FastMCP's lifespan pattern to manage all notebook sessions:
 
 ```python
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    session = _build_session(_server_config)
-    await session.start()       # Connect kernel WS, join collab room
+    manager = SessionManager(config=_server_config)
+    default_path = _server_config.get("notebook_path")
     try:
-        yield AppContext(session=session)
+        if default_path:
+            await manager.open(default_path)
+        yield AppContext(manager=manager)
     finally:
-        await session.stop()    # Disconnect WS, leave collab room
+        await manager.close_all()
 ```
 
 This ensures:
-- The kernel and document transports are fully connected **before** any tools are called
+- A configured default notebook is connected before any tools are called
 - Cleanup happens gracefully on shutdown (even on errors)
-- All tools share a single session instance — no per-request overhead
+- Tools share sessions by canonical notebook path
 
 ---
 
@@ -179,8 +224,8 @@ This ensures:
 
 | Package | Purpose |
 |---|---|
-| `agent-jupyter-toolkit>=0.2.15` | Kernel management, notebook transport, code execution utilities |
-| `mcp>=1.26.0` | MCP Python SDK — `FastMCP`, `Context`, `ToolAnnotations`, transport implementations |
+| `agent-jupyter-toolkit` | Kernel management, notebook transport, code execution utilities; developed and released with the MCP package |
+| `mcp>=1.26.0,<3` | MCP Python SDK — compatibility adapter supports FastMCP 1.26 and MCPServer 2.x |
 
 The server delegates all Jupyter-specific logic to `agent-jupyter-toolkit`. The MCP layer is responsible only for:
 - Exposing tools with the correct schemas

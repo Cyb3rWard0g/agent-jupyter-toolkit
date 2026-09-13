@@ -6,14 +6,32 @@ These tests verify:
   - NotebookSession.install_packages() / uninstall_packages() / get_tracked_dependencies()
 """
 
+import contextlib
+import io
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nbformat
 import pytest
 
+from agent_jupyter_toolkit.kernel import ExecutionResult
 from agent_jupyter_toolkit.notebook import NotebookSession, make_document_transport
+from agent_jupyter_toolkit.utils.packages import uninstall_packages
 
 pytestmark = pytest.mark.asyncio
+
+
+class InlineKernel:
+    """Execute generated package helper code without starting another process."""
+
+    async def is_alive(self):
+        return True
+
+    async def execute(self, code, **_kwargs):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exec(code, {})
+        return ExecutionResult(status="ok", stdout=output.getvalue())
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +160,21 @@ async def test_update_metadata_fires_change_callback(tmp_path):
     assert "foo" in events[0]["keys"]
 
 
+async def test_uninstall_uses_distribution_presence_not_requirement_satisfaction():
+    """A mismatched version constraint must still uninstall the named distribution."""
+    completed = SimpleNamespace(returncode=1, stderr="blocked for test")
+    with patch("subprocess.run", return_value=completed) as run:
+        result = await uninstall_packages(InlineKernel(), ["packaging>9999"])
+
+    entry = result["report"]["packaging>9999"]
+    assert entry["was_installed"] is True
+    assert entry["uninstalled"] is False
+    assert entry["error"] == "uninstall exit code 1"
+    command = run.call_args.args[0]
+    assert "packaging" in command
+    assert "packaging>9999" not in command
+
+
 # ---------------------------------------------------------------------------
 # Session-level dependency tracking tests (mocked kernel)
 # ---------------------------------------------------------------------------
@@ -217,12 +250,44 @@ async def test_install_packages_tracks_in_metadata(tmp_path):
     assert deps["pandas"]["version"] == "2.1.0"
     assert "numpy" in deps
     assert deps["numpy"]["version"] == "1.26.0"
+    assert deps["pandas"]["requirement"] == "pandas"
     assert "installed_at" in deps["pandas"]
 
     # Verify on disk
     on_disk = nbformat.read(nb_path, as_version=4)
     assert "agent_dependencies" in on_disk.metadata
     assert on_disk.metadata["agent_dependencies"]["pandas"]["version"] == "2.1.0"
+
+
+async def test_dependency_tracking_uses_distribution_identity_for_specifiers(tmp_path):
+    nb_path = tmp_path / "specified-deps.ipynb"
+    nbformat.write(nbformat.v4.new_notebook(), nb_path)
+    session = NotebookSession(
+        kernel=_make_mock_kernel(),
+        doc=make_document_transport(
+            mode="local",
+            local_path=str(nb_path),
+            remote_base=None,
+            remote_path=None,
+            token=None,
+            headers_json=None,
+        ),
+    )
+    await session.start()
+
+    with patch(
+        "agent_jupyter_toolkit.utils.packages.get_package_versions",
+        new=AsyncMock(return_value={"Pandas[excel]>=2": "2.3.0"}),
+    ):
+        await session._track_dependencies(["Pandas[excel]>=2"])
+
+    dependencies = await session.get_tracked_dependencies()
+    assert list(dependencies) == ["pandas"]
+    assert dependencies["pandas"]["requirement"] == "Pandas[excel]>=2"
+    assert dependencies["pandas"]["version"] == "2.3.0"
+
+    await session._untrack_dependencies(["pandas<3"])
+    assert await session.get_tracked_dependencies() == {}
 
 
 async def test_install_packages_no_track_skips_metadata(tmp_path):

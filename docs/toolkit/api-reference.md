@@ -29,8 +29,10 @@ High-level kernel session wrapping a `KernelTransport`.
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `start()` | `async def start() -> None` | Start/attach to kernel |
-| `shutdown()` | `async def shutdown() -> None` | Stop kernel, release resources |
+| `shutdown()` | `async def shutdown() -> None` | Release resources; terminate only an owned kernel/session |
+| `shutdown_kernel()` | `async def shutdown_kernel() -> None` | Explicitly terminate even a borrowed kernel |
 | `is_alive()` | `async def is_alive() -> bool` | Kernel responsiveness check |
+| `session_info()` | `def session_info() -> SessionInfo` | IDs, ownership, generation, connection/encryption policy |
 
 Supports `async with` for automatic lifecycle.
 
@@ -43,7 +45,11 @@ async def execute(
     *,
     timeout: float | None = None,
     output_callback: OutputCallback | None = None,
+    silent: bool = False,
     store_history: bool = True,
+    user_expressions: dict | None = None,
+    metadata: dict | None = None,
+    subshell_id: str | None = None,
     allow_stdin: bool = False,
     stop_on_error: bool = True,
 ) -> ExecutionResult
@@ -64,6 +70,15 @@ async def execute(
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `interrupt()` | `async def interrupt() -> None` | Send SIGINT to kernel |
+| `restart()` | `async def restart() -> None` | Restart the kernel and increment its generation |
+| `create_subshell()` | `async def create_subshell() -> str` | Create an advertised kernel subshell |
+| `list_subshells()` | `async def list_subshells() -> list[str]` | List active subshell IDs |
+| `delete_subshell(id)` | `async def delete_subshell(subshell_id: str) -> None` | Delete a subshell |
+| `debug(request)` | `async def debug(request: dict) -> dict` | Send a DAP control request to an advertised debugger |
+
+Optional workflows raise `UnsupportedKernelCapabilityError` unless the kernel
+lists the corresponding `"kernel subshells"` or `"debugger"` feature in its
+kernel-info reply.
 
 #### Properties
 
@@ -82,6 +97,14 @@ class SessionConfig:
     kernel_name: str = "python3"
     connection_file_name: str | None = None
     packer: str | None = None
+    startup_timeout: float = 60.0
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    kernel_args: list[str] = field(default_factory=list)
+    max_output_bytes: int | None = 50 * 1024 * 1024
+    output_callback_timeout: float | None = 30.0
+    transport_encryption: str = "disabled"
+    manager_factory: Callable[..., Any] | None = None
     server: ServerConfig | None = None
 ```
 
@@ -95,6 +118,26 @@ class ServerConfig:
     headers: dict[str, str] | None = None
     kernel_name: str = "python3"
     notebook_path: str | None = None
+    request_timeout: float = 30.0
+    startup_timeout: float = 60.0
+    max_output_bytes: int | None = 50 * 1024 * 1024
+    output_callback_timeout: float | None = 30.0
+```
+
+### `SessionInfo`
+
+```python
+@dataclass(frozen=True)
+class SessionInfo:
+    transport: str
+    kernel_id: str | None = None
+    server_session_id: str | None = None
+    owns_kernel: bool = False
+    owns_session: bool = False
+    connection_file: str | None = None
+    kernel_generation: int = 0
+    transport_encryption: str = "disabled"
+    encryption_enabled: bool = False
 ```
 
 ### `ExecutionResult`
@@ -109,6 +152,19 @@ class ExecutionResult:
     outputs: list[dict[str, Any]] = field(...)      # nbformat output dicts
     user_expressions: dict[str, Any] | None = None
     elapsed_ms: float | None = None
+    request_id: str | None = None
+    cell_id: str | None = None
+    source_hash: str | None = None
+    kernel_generation: int = 0
+    persistence_status: str = "not-requested"
+    persistence_error: str | None = None
+    output_truncated: bool = False
+    dropped_output_bytes: int = 0
+    callback_snapshots_coalesced: int = 0
+    callback_status: str = "not-requested"
+    callback_error: str | None = None
+    outcome: str = "completed"
+    timed_out: bool = False
 ```
 
 ### `CompleteResult`
@@ -174,7 +230,21 @@ class KernelInfoResult:
     language_info: dict[str, Any] = field(...)
     banner: str = ""
     status: str = "ok"
+    help_links: list[dict[str, Any]] = field(default_factory=list)
+    supported_features: list[str] = field(default_factory=list)
+    raw_content: dict[str, Any] = field(default_factory=dict)
 ```
+
+### Optional notebook utilities
+
+`execute_notebook_batch(notebook, *, kernel_name="python3", timeout=120,
+allow_errors=False, cwd=None)` executes a validated copy with a dedicated
+nbclient-owned kernel and requires the `batch` extra. Its per-cell timeout is an
+integer number of seconds, or `None` for no timeout.
+
+`inspect_notebook_trust(notebook, *, notary)` returns signature and cell-trust
+status against the caller-supplied `NotebookNotary`. It does not sign or mutate
+the notebook.
 
 ### `OutputCallback`
 
@@ -233,10 +303,13 @@ Low-level kernel process manager (wraps `AsyncKernelManager`).
 ```python
 class VariableManager:
     def __init__(self, session: Session, language: str = "python"): ...
-    async def set(self, name: str, value: Any, mimetype=None) -> None: ...
+    async def set(self, name: str, value: Any, mimetype: str | None = None) -> None: ...
     async def get(self, name: str) -> Any: ...
     async def list(self, *, detailed: bool = False) -> list[str] | list[VariableDescription]: ...
 ```
+
+`set()` and `get()` use a strict JSON transfer contract. `mimetype`, when
+provided, must be `application/json`.
 
 ---
 
@@ -300,11 +373,13 @@ Runtime-checkable protocol for notebook document operations.
 | `fetch()` | `async def fetch() -> dict` | Get notebook as nbformat dict |
 | `save(content)` | `async def save(dict) -> None` | Persist notebook |
 | `append_code_cell(source, ...)` | `async def ... -> int` | Append code cell |
+| `append_code_cell_with_id(source, ...)` | `async def ... -> tuple[int, str]` | Append and capture its stable ID in one mutation |
 | `insert_code_cell(index, source, ...)` | `async def ... -> None` | Insert code cell |
 | `append_markdown_cell(source, ...)` | `async def ... -> int` | Append markdown cell |
 | `insert_markdown_cell(index, source, ...)` | `async def ... -> None` | Insert markdown cell |
 | `update_cell_outputs(index, outputs, count)` | `async def ... -> None` | Replace cell outputs |
 | `set_cell_source(index, source)` | `async def ... -> None` | Replace cell source |
+| `set_cell_source_by_id(cell_id, source, expected_source=None)` | `async def ... -> int` | Resolve, verify, and replace source in one mutation |
 | `get_cell(index)` | `async def ... -> dict` | Read a single cell |
 | `cell_count()` | `async def ... -> int` | Count cells |
 | `get_cell_source(index)` | `async def ... -> str` | Read source text only |
@@ -316,6 +391,70 @@ Runtime-checkable protocol for notebook document operations.
 
 Implementations: `LocalFileDocumentTransport`, `ContentsApiDocumentTransport`,
 `CollabYjsDocumentTransport`.
+
+---
+
+### `NotebookWorkspace` and `NotebookWorkspaceConfig`
+
+Manage multiple open notebook sessions directly from Python, independently of
+MCP. The workspace creates sessions, resolves paths, remembers one default,
+and coordinates concurrent open, close, delete, and shutdown operations.
+
+```python
+from agent_jupyter_toolkit.notebook import NotebookWorkspace, NotebookWorkspaceConfig
+
+async with NotebookWorkspace(NotebookWorkspaceConfig(mode="local")) as workspace:
+    analysis = await workspace.open("analysis.ipynb")  # First open becomes default.
+    await workspace.get().append_and_run("x = 10")
+
+    report = await workspace.open("report.ipynb")     # Default stays analysis.
+    workspace.set_default("./report.ipynb")
+    await workspace.get().append_and_run("x = 99")
+
+    workspace.set_default("analysis.ipynb")           # Reuse its running kernel.
+    await workspace.get().append_and_run("print(x)")  # Prints 10.
+```
+
+`NotebookWorkspace(config=None, default_path=None)` defaults to local Python
+kernels. If `default_path` is supplied, context entry opens it. Context exit
+closes all sessions, including when the body raises. Outside an async context,
+call `await workspace.close_all()` in a `finally` block. Shutdown is terminal;
+create another workspace to start again. Use workspace lifecycle methods to
+close managed sessions.
+
+`NotebookWorkspaceConfig` accepts `mode` (`"local"` or `"server"`), `kernel_name`
+(`"python3"`), `base_url`, `token`, `headers`, `prefer_collab` (`True`), and
+`collaboration_mode` (`None`, or `"required"`, `"preferred"`, `"disabled"`). Server
+mode requires a Jupyter `base_url` when opening, listing files, or deleting files.
+These settings describe the Jupyter backend, independently of any MCP transport.
+
+| Operation | Behavior |
+|---|---|
+| `await open(path)` | Open or reuse a session; the first open becomes default if none is selected |
+| `get(path=None)` | Get an open session; omitted path uses the default; explicit lookup does not switch it |
+| `set_default(path)` | Select an already open notebook; raises if it is absent or the workspace is shutting down |
+| `is_default(path)` | Compare a path with the default using the same normalization as lookup |
+| `default_path`, `paths`, `len(workspace)` | Read the default, open paths, and session count |
+| `list_sessions()` | Summarize open notebooks, their default status, and document transports |
+| `await list_notebook_files(directory=".", recursive=False)` | Discover notebook files; remote paths are URL-encoded and Jupyter errors are propagated |
+| `await close(path)` | Remove and stop a session; if it was default, select the first remaining open notebook |
+| `await delete(path)` | Close a session and delete its notebook file |
+| `await close_all()` | Reject new opens/deletes and drain every session before propagating caller cancellation |
+
+Local paths resolve against the process working directory and become absolute;
+server paths have leading/trailing slashes removed. Setting `default_path`
+directly also normalizes it, but permits preselection before opening. Prefer
+`set_default()` when changing between live sessions.
+
+Switching the default does not restart or close either kernel. Closing detaches
+from borrowed kernels and stops owned kernels; the notebook file remains unless
+`delete()` is used. Variables live in kernels and are not restored by reopening
+a saved notebook.
+
+There is one default per workspace, shared by all its callers. This API does
+not provide per-agent authorization, workflow scopes, durable run tracking, or
+kernel quotas. Different workspaces have independent registries; they can still
+attach to the same external Jupyter kernel when configured for the same notebook.
 
 ---
 
@@ -383,6 +522,7 @@ def make_document_transport(
     token: str | None,
     headers_json: str | None,
     prefer_collab: bool = False,
+    collaboration_mode: str | None = None,
     create_if_missing: bool = False,
     local_autosave_delay: float | None = None,
 ) -> NotebookDocumentTransport
@@ -433,7 +573,9 @@ def create_notebook_transport(mode, path, *, base_url=None, ...) -> NotebookDocu
 ### Execution Functions
 
 ```python
-async def execute_code(session, code, *, timeout=120.0, format_outputs=True)
+async def execute_code(
+    session, code, *, timeout=120.0, format_outputs=True, subshell_id=None
+)
     -> NotebookCodeExecutionResult
 
 async def invoke_code_cell(notebook_session, code, *, timeout=120.0, format_outputs=True)
@@ -483,9 +625,25 @@ DATA_VIZ_PACKAGES: list[str]
 WEB_PACKAGES: list[str]
 ```
 
+Package arguments are PEP 508 requirement strings. Availability checks honor
+versions, markers, and extras in the kernel environment. Direct URL references
+are rejected because installed provenance cannot be verified consistently.
+
 ### Notebook File Helpers
 
 ```python
 def create_minimal_notebook_content() -> dict
 async def create_notebook_via_contents_api(base_url, path, token=None, headers=None) -> None
 ```
+
+### Notebook Validation
+
+```python
+def validate_notebook(notebook) -> None
+def normalize_notebook(
+    notebook, *, strip_invalid_metadata=False
+) -> tuple[int, NotebookNode]
+```
+
+Validation is non-mutating. Normalization returns a repaired copy and the
+number of changes.

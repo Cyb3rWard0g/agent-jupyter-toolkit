@@ -22,8 +22,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-
+from mcp_jupyter_notebook._mcp import FastMCP, run_http_server
 from mcp_jupyter_notebook.context import AppContext, SessionManager
 from mcp_jupyter_notebook.tools import register_notebook_tools
 
@@ -90,7 +89,7 @@ def process_config(args: Any) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        Configuration dictionary consumed by :func:`_build_session` and
+        Configuration dictionary consumed by the core workspace adapter and
         :func:`run_server`.
     """
     cfg: dict[str, Any] = {}
@@ -136,9 +135,18 @@ def process_config(args: Any) -> dict[str, Any]:
     # Headers
     cfg["headers"] = _parse_headers_env()
 
-    # Collab transport (real-time Yjs sync in browser)
-    collab_env = os.getenv("MCP_JUPYTER_PREFER_COLLAB", "true").lower()
-    cfg["prefer_collab"] = collab_env in ("1", "true", "yes")
+    # Notebook collaboration policy. The older boolean remains a compatibility alias.
+    collaboration_mode = getattr(args, "collaboration_mode", None)
+    if collaboration_mode is None:
+        collaboration_mode = os.getenv("MCP_JUPYTER_COLLABORATION_MODE")
+    if collaboration_mode is None:
+        legacy = os.getenv("MCP_JUPYTER_PREFER_COLLAB", "true").lower()
+        collaboration_mode = "preferred" if legacy in ("1", "true", "yes") else "disabled"
+    collaboration_mode = collaboration_mode.lower()
+    if collaboration_mode not in {"required", "preferred", "disabled"}:
+        raise ValueError("collaboration mode must be 'required', 'preferred', or 'disabled'")
+    cfg["collaboration_mode"] = collaboration_mode
+    cfg["prefer_collab"] = collaboration_mode != "disabled"
 
     # Optional tool sets
     # - CLI: --enable-tools postgresql --enable-tools other
@@ -187,14 +195,15 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 
     manager = SessionManager(config=cfg, default_path=None)
 
-    # Auto-open the default notebook so single-notebook usage works unchanged
-    if default_path:
-        log.info("Opening default notebook: %s", default_path)
-        await manager.open(default_path)
-    else:
-        log.info("No default notebook configured; agents must use notebook_open.")
-
     try:
+        # Keep startup inside the cleanup boundary. manager.open() shields its
+        # shared startup task, so cancellation must drain it before returning.
+        if default_path:
+            log.info("Opening default notebook: %s", default_path)
+            await manager.open(default_path)
+        else:
+            log.info("No default notebook configured; agents must use notebook_open.")
+
         yield AppContext(manager=manager)
     finally:
         log.info("Shutting down SessionManager (%d sessions)…", len(manager))
@@ -277,13 +286,8 @@ async def run_server(cfg: dict[str, Any]) -> None:
     match transport:
         case "stdio":
             await mcp.run_stdio_async()
-        case "sse":
-            await mcp.run_sse_async(host=cfg["host"], port=cfg["port"])
-        case "streamable-http":
-            await mcp.run_streamable_http_async(
-                host=cfg["host"],
-                port=cfg["port"],
-            )
+        case "sse" | "streamable-http":
+            await run_http_server(mcp, transport, host=cfg["host"], port=cfg["port"])
         case _:
             raise SystemExit(f"Unknown transport: {transport}")
 

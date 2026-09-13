@@ -66,6 +66,7 @@ def mock_manager(mock_session):
     manager = MagicMock(spec=SessionManager)
     manager.get.return_value = mock_session
     manager.default_path = "test.ipynb"
+    manager.is_default.side_effect = lambda path: path == manager.default_path
     manager.paths = ["test.ipynb"]
     manager.list_sessions.return_value = [{"notebook_path": "test.ipynb", "is_default": True}]
     manager.open = AsyncMock(return_value=mock_session)

@@ -57,6 +57,8 @@ packages/agent-jupyter-toolkit/src/agent_jupyter_toolkit/
 │   ├── types.py                    # Dataclasses: NotebookCodeExecutionResult, etc.
 │   ├── transport.py                # NotebookDocumentTransport protocol
 │   ├── session.py                  # NotebookSession (kernel + document orchestration)
+│   ├── workspace.py                # NotebookWorkspace registry, defaults, and lifecycle
+│   ├── _workspace_files.py         # Local and Contents API workspace file operations
 │   ├── factory.py                  # make_document_transport() factory
 │   ├── buffer.py                   # NotebookBuffer (in-memory staged edits)
 │   ├── cells.py                    # create_code_cell(), create_markdown_cell()
@@ -134,8 +136,9 @@ ensure type safety and IDE autocompletion.
 
 The toolkit uses callbacks at multiple levels:
 
-1. **Output streaming** — `output_callback` in `execute()` provides real-time
-   cell output updates
+1. **Output streaming** — `output_callback` in `execute()` receives ordered,
+   cumulative snapshots from a bounded dispatcher. Slow callbacks are
+   coalesced and callback failures are reported separately from execution.
 2. **Execution hooks** — `KernelHooks` singleton for pre/post execution
    instrumentation
 3. **Change observers** — `on_change()` on document transports for reactive
@@ -159,6 +162,33 @@ class MyCustomTransport:
 assert isinstance(MyCustomTransport(), NotebookDocumentTransport)  # True
 ```
 
+## Notebook Workspace
+
+`agent_jupyter_toolkit.notebook.NotebookWorkspace` manages multiple
+`NotebookSession` objects. `NotebookWorkspaceConfig` holds Jupyter backend
+settings independently of any agent framework. The workspace owns path lookup,
+default selection, session creation, file discovery/deletion, and the concurrent
+open/close/delete/shutdown barriers.
+
+File creation, discovery, deletion, Contents URL encoding, and HTTP error handling
+are delegated to private local/server backends in `_workspace_files.py`. This keeps
+the registry focused on session state and gives both storage modes the same small
+interface.
+
+The MCP package's `context.SessionManager` is a compatibility adapter: it converts
+MCP configuration into `NotebookWorkspaceConfig` and inherits the core behavior.
+`AppContext` makes that workspace available to tools. Existing tool arguments
+remain unchanged; calls omitting `notebook_path` resolve the workspace default.
+
+This is an in-process component. A remote MCP deployment runs the workspace in
+its server environment and connects to Jupyter's APIs; clients do not install a
+separate workspace service. Python applications can use the workspace directly.
+There is one default per workspace, shared by its callers. Extraction into the
+core does not introduce per-agent isolation or persistent run scheduling.
+
+See the [workspace API](toolkit/api-reference.md#notebookworkspace-and-notebookworkspaceconfig)
+and [MCP notebook lifecycle](mcp-server/tools.md#notebook-lifecycle) for examples.
+
 ## Data Flow
 
 ### Code Execution (Local)
@@ -181,7 +211,7 @@ LocalTransport.execute(code)
     │   IOPub messages (stream, display_data, execute_result, error)
     │       │
     │       ▼
-    │   output_hook() — accumulates outputs, fires output_callback
+    │   output_hook() — updates state and signals callback dispatcher
     │
     ▼
 ExecutionResult (status, outputs, stdout, stderr)
@@ -215,15 +245,15 @@ ExecutionResult
 ```
 NotebookSession.append_and_run(code)
     │
-    ├─▶ doc.append_code_cell(code) → cell_index
+    ├─▶ doc.append_code_cell_with_id(code) → capture cell ID atomically
     │
     ├─▶ kernel.execute(code, output_callback=streaming_cb)
     │       │
     │       ▼
-    │   Each IOPub message:
-    │       streaming_cb → doc.update_cell_outputs(idx, outputs, count)
+    │   Incremental reducer snapshots:
+    │       streaming_cb → doc.update_cell_outputs_by_id(id, outputs, count)
     │
-    ├─▶ Final: doc.update_cell_outputs(idx, normalized_outputs, count)
+    ├─▶ Final: validate ID/source and persist nbformat outputs
     │
     ▼
 (cell_index, ExecutionResult)
@@ -239,20 +269,29 @@ simple use cases:
 | Package | Purpose |
 |---------|---------|
 | `jupyter_client` | ZMQ kernel management, wire protocol |
-| `jupyter_kernel_client` | Extended kernel client features |
 | `nbformat` | Notebook format read/write/validation |
 | `aiohttp` | HTTP client for server transports |
 
-### Collaboration (optional, imported lazily)
+### Collaboration client
 
 | Package | Purpose |
 |---------|---------|
 | `pycrdt` | CRDT types (Doc, Array, Map, Text, Awareness) |
 | `jupyter_ydoc` | YNotebook — Yjs notebook model |
+| `packaging` | PEP 508 parsing and version/extras/marker checks |
 
-The collaborative transport (`CollabYjsDocumentTransport`) is only imported
-when `prefer_collab=True` is passed to the factory. This avoids pulling in
-`pycrdt` and `jupyter_ydoc` for kernel-only or file-only workflows.
+The collaboration client libraries are core because the package exposes the
+collaborative document transport directly. The server-side
+`jupyter-collaboration` extension remains an integration dependency.
+
+### Feature extras
+
+| Extra | Purpose |
+|---------|---------|
+| `local` | ipykernel for a managed local Python kernel |
+| `batch` | nbclient-backed dedicated notebook execution |
+| `dataframe` | pandas and Arrow serialization |
+| `integration` | Jupyter Server and collaboration test environment |
 
 ### Optional scientific stack
 
@@ -266,15 +305,25 @@ These are detected at runtime and registered via `mimetypes.register_*_handlers(
 
 ## Thread Safety and Concurrency
 
-- **Sessions and transports are designed for single-task use.** Share them
-  across tasks only with external synchronization.
+- Shared shell-channel consumers are serialized so replies cannot be stolen by
+  another execution or introspection request. Interrupt and lifecycle control
+  remain available through their own paths.
+- Control-channel requests use a separate lock. Remote WebSocket frames are
+  routed to per-request queues by parent message ID, so debugger control does
+  not compete with an active execution collector.
+- `NotebookSession` serializes multi-step append, source-update, execution, and
+  run-all workflows. Cell IDs are captured or resolved in the document mutation
+  that needs them.
 - `KernelManager` uses an internal `asyncio.Lock` for lifecycle operations
   (start, shutdown, restart, interrupt).
 - `LocalFileDocumentTransport` uses an `asyncio.Lock` for file I/O.
 - `CollabYjsDocumentTransport` uses an `asyncio.Lock` for cell mutations
   that involve multi-step CRDT operations.
-- Output callbacks are invoked sequentially in message order; they should
-  not block the event loop.
+- Output callbacks run sequentially in a separate dispatcher. It keeps the
+  newest pending snapshot, applies a configurable timeout, and records
+  coalescing or errors on `ExecutionResult`.
+- Collaboration output updates mutate existing CRDT fields, and broadcasts use
+  state-vector deltas whose baseline advances only after a successful send.
 
 ## Extension Points
 

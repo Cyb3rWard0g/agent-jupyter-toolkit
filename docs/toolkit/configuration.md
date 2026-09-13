@@ -16,7 +16,20 @@ passed to `create_session()`:
 | `kernel_name` | `str` | `"python3"` | Kernel spec to spawn |
 | `connection_file_name` | `str \| None` | `None` | Attach to existing kernel (local mode) |
 | `packer` | `str \| None` | `None` | Serializer name (`"json"`, `"orjson"`) |
+| `startup_timeout` | `float` | `60.0` | Seconds to wait for local kernel readiness |
+| `cwd` | `str \| None` | `None` | Working directory for a newly launched local kernel |
+| `env` | `dict[str, str] \| None` | `None` | Environment overrides merged into the launch environment |
+| `kernel_args` | `list[str]` | `[]` | Additional kernelspec launch arguments |
+| `max_output_bytes` | `int \| None` | `52428800` | Visible output budget; `None` disables the limit |
+| `output_callback_timeout` | `float \| None` | `30.0` | Per-callback delivery limit; `None` disables it |
+| `transport_encryption` | `str` | `"disabled"` | CurveZMQ policy: `disabled`, `auto`, or `required` |
+| `manager_factory` | `Callable \| None` | `None` | Factory implementing the toolkit's `KernelManager` interface |
 | `server` | `ServerConfig \| None` | `None` | Required when `mode="server"` |
+
+When `connection_file_name` is set, it must identify an existing file. A missing
+file raises `FileNotFoundError` and never launches a replacement kernel. `cwd`,
+`env`, `kernel_args`, and `transport_encryption` are launch-only options and are
+rejected in attachment mode.
 
 ### `ServerConfig`
 
@@ -27,6 +40,10 @@ passed to `create_session()`:
 | `headers` | `dict \| None` | `None` | Extra HTTP headers (cookies, XSRF, etc.) |
 | `kernel_name` | `str` | `"python3"` | Kernel to create on the server |
 | `notebook_path` | `str \| None` | `None` | Bind kernel to a specific notebook via Sessions API |
+| `request_timeout` | `float` | `30.0` | Timeout for server control requests |
+| `startup_timeout` | `float` | `60.0` | Timeout for restart/readiness checks |
+| `max_output_bytes` | `int \| None` | `52428800` | Visible output budget; `None` disables the limit |
+| `output_callback_timeout` | `float \| None` | `30.0` | Per-callback delivery limit; `None` disables it |
 
 ### Example
 
@@ -108,6 +125,7 @@ accept these parameters:
 | `token` | `str` | Authentication token |
 | `headers_json` | `str` | JSON string of extra headers |
 | `prefer_collab` | `bool` | Use Yjs/CRDT transport if available |
+| `collaboration_mode` | `str \| None` | `required`, `preferred`, or `disabled`; overrides `prefer_collab` |
 | `create_if_missing` | `bool` | Create notebook if it doesn't exist |
 | `local_autosave_delay` | `float` | Debounce delay for local writes (seconds) |
 
@@ -162,7 +180,8 @@ path = ensure_allowed(Path("/etc/passwd"))
 
 `VariableManager.set()` serializes values via base64-encoded JSON to prevent
 code injection through crafted variable names or values. Variable names are
-validated as legal Python identifiers.
+validated as legal Python identifiers. Non-JSON values, non-finite numbers, and
+kernel-side assignment errors are rejected instead of falling back to `repr()`.
 
 ### Pickle warnings
 

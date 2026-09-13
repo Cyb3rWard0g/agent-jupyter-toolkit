@@ -1,8 +1,8 @@
 # Tools Reference
 
-The MCP Jupyter Notebook server exposes **37 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** for database exploration and query→DataFrame workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
+The MCP Jupyter Notebook server exposes **43 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** for database exploration and query→DataFrame workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
 
-> **Multi-notebook support:** Every tool accepts an optional `notebook_path` parameter. When omitted, the tool targets the default notebook (backward compatible with single-notebook setups).
+> **Multi-notebook support:** Tools operating on a session accept an optional `notebook_path`. When omitted, they target the manager's default notebook. Lifecycle tools such as opening and closing require an explicit path.
 
 > **PostgreSQL tools:** Enable with `MCP_JUPYTER_ENABLE_TOOLS=postgresql` or `--enable-tools postgresql`. See [Configuration](configuration.md) for details.
 
@@ -34,11 +34,38 @@ Open a notebook and create a session for it. If the notebook is already open the
 
 **Example prompt:** *"Open analysis.ipynb"*
 
+Opening another notebook leaves an existing default selected unless
+`set_default=true`. Switching the default reuses the selected notebook session
+and keeps other sessions open. Explicitly passing `notebook_path` to an execution
+tool targets that notebook for that call without changing the default.
+
+For example, these simplified tool calls need no session ID:
+
+```python
+notebook_open(notebook_path="analysis.ipynb", set_default=True)
+notebook_code_run(code="x = 10")
+notebook_open(notebook_path="report.ipynb")  # Analysis is still default.
+notebook_code_run(notebook_path="report.ipynb", code="x = 99")
+notebook_open(notebook_path="report.ipynb", set_default=True)
+notebook_code_run(code="print(x)")  # Report's kernel prints 99.
+notebook_open(notebook_path="analysis.ipynb", set_default=True)
+notebook_code_run(code="print(x)")  # Analysis's kernel still holds 10.
+```
+
+`notebook_list` reports the current default and all open notebooks. Defaults
+belong to the server's manager, not to a model's conversation. Callers sharing
+that manager share the default; use explicit paths when their work overlaps.
+Local relative paths and their absolute equivalents select the same session.
+
 ---
 
 ### `notebook_close`
 
-Close a notebook session and release its resources. Shuts down the kernel and disconnects the document transport.
+Close a notebook session and release its resources. Stops owned kernels,
+detaches from borrowed kernels, and disconnects the document transport. The
+notebook file remains. Closing the default selects the first remaining open
+notebook, or clears the default when none remain. Live variables are lost when
+their kernel stops; the notebook file does not preserve its entire Python state.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -75,6 +102,10 @@ Discover `.ipynb` files available for opening. In local mode scans the filesyste
 
 **Returns:** `ok`, `directory`, `recursive`, `notebooks` (list with `path`, `name`, `is_open`)
 
+Remote directory paths are encoded for the Jupyter Contents API. Authentication,
+permission, and other non-success responses return `ok: false` with the server
+error instead of appearing as an empty directory.
+
 **Example prompt:** *"What notebooks are in this project?"*
 
 ---
@@ -106,7 +137,15 @@ Append a new code cell to the notebook, execute it, and return outputs.
 | `code` | `string` | Yes | — | Python code to execute |
 | `timeout` | `float` | No | `120.0` | Execution timeout in seconds |
 
-**Returns:** `ok`, `cell_id`, `cell_index`, `execution_count`, `status`, `stdout`, `stderr`, `outputs`, `text_outputs`, `formatted_output`, `error_message`, `elapsed_seconds`
+**Returns:** ordinary output fields plus `cell_id`, `request_id`, `source_hash`,
+`kernel_generation`, `persistence_status`, `persistence_error`,
+`output_truncated`, `dropped_output_bytes`, `callback_status`, `callback_error`,
+`callback_snapshots_coalesced`, `outcome`, and `timed_out`.
+
+Execution success and notebook persistence are separate. A stale/deleted cell can
+return successful kernel output with `persistence_status="error"`. A timeout or
+disconnect can have `outcome="unknown"`; callers should inspect kernel state before
+retrying code with side effects.
 
 **Example prompt:** *"Run `print('Hello, world!')` in the notebook"*
 
@@ -138,8 +177,11 @@ Execute code directly in the kernel **without** creating a notebook cell. Use th
 |---|---|---|---|---|
 | `code` | `string` | Yes | — | Python code to execute |
 | `timeout` | `float` | No | `120.0` | Execution timeout in seconds |
+| `subshell_id` | `string` | No | `null` | Execute in an ID returned by `notebook_subshell_create` |
 
-**Returns:** `ok`, `status`, `stdout`, `stderr`, `outputs`, `text_outputs`, `formatted_output`, `error_message`, `elapsed_seconds`
+**Returns:** ordinary output fields plus `request_id`, `kernel_generation`,
+`output_truncated`, `dropped_output_bytes`, `callback_status`, `callback_error`,
+`callback_snapshots_coalesced`, `outcome`, and `timed_out`.
 
 **Example prompt:** *"Check if scikit-learn is importable without adding a cell"*
 
@@ -386,7 +428,10 @@ Return the number of cells currently in the notebook.
 
 ### `notebook_packages_install`
 
-Install Python packages in the kernel environment. Accepts pip-style version specifiers and skips packages that are already available.
+Install Python packages in the kernel environment. Inputs are PEP 508
+requirements, and installation is skipped only when the kernel distribution
+satisfies the requested version, marker, and extras. Direct URL references are
+rejected; use a distribution name with optional constraints.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -398,17 +443,48 @@ Install Python packages in the kernel environment. Accepts pip-style version spe
 
 ---
 
+### `notebook_packages_uninstall`
+
+Uninstall distributions from the kernel. Each input is parsed as a PEP 508
+requirement, and the parsed distribution name is passed to pip/uv. Matching
+canonical entries are removed from notebook dependency metadata by default.
+Distribution presence is checked by name, so a mismatched version constraint
+does not incorrectly skip removal.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `packages` | `list[str]` | Yes | — | Distribution requirements to uninstall |
+| `untrack` | `bool` | No | `true` | Remove successful uninstalls from tracked metadata |
+
+**Returns:** `ok`, `packages`, `report`, `untracked`
+
+---
+
 ### `notebook_packages_check`
 
 Check which packages are available in the kernel without installing anything.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `packages` | `list[str]` | Yes | — | Package names to check |
+| `packages` | `list[str]` | Yes | — | PEP 508 requirements to check |
 
 **Returns:** `ok`, `packages` (mapping of name → `true`/`false`)
 
 **Example prompt:** *"Check if numpy and scipy are available"*
+
+---
+
+### `notebook_dependencies_list`
+
+List dependencies tracked in notebook metadata. Entries use canonical
+distribution names and include the requested requirement, resolved version,
+and installation timestamp.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| *(none)* | — | — | — | — |
+
+**Returns:** `ok`, `dependencies`, `count`
 
 ---
 
@@ -436,7 +512,9 @@ Get detailed kernel metadata including protocol version, implementation, languag
 |---|---|---|---|---|
 | *(none)* | — | — | — | — |
 
-**Returns:** `ok`, `protocol_version`, `implementation`, `implementation_version`, `language_info`, `banner`
+**Returns:** `ok`, `protocol_version`, `implementation`,
+`implementation_version`, `language_info`, `banner`, `help_links`,
+`supported_features`, and `raw_content`.
 
 **Example prompt:** *"What Python version is the kernel running?"*
 
@@ -444,7 +522,8 @@ Get detailed kernel metadata including protocol version, implementation, languag
 
 ### `notebook_session_info`
 
-Get session info: kernel type, whether it's alive, connection details, and kernel name.
+Get non-secret kernel/session identity, ownership, generation, encryption state,
+selected notebook transport, collaboration mode, and fallback reason.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -483,6 +562,48 @@ Restart the Jupyter kernel, clearing all state. Shuts down the running kernel an
 **Returns:** `ok`
 
 **Example prompt:** *"Restart the kernel — I need a clean slate"*
+
+---
+
+### `notebook_subshell_create`
+
+Create a kernel subshell and return its stable ID. The kernel must advertise
+`"kernel subshells"` in `notebook_kernel_info.supported_features`.
+
+**Returns:** `ok`, `subshell_id`, or a capability error
+
+---
+
+### `notebook_subshell_list`
+
+List active subshell IDs on a capable kernel.
+
+**Returns:** `ok`, `subshell_ids`, or a capability error
+
+---
+
+### `notebook_subshell_delete`
+
+Delete a kernel subshell.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `subshell_id` | `string` | Yes | — | Stable subshell ID to delete |
+
+**Returns:** `ok`, `subshell_id`, or an error
+
+---
+
+### `notebook_debug_request`
+
+Send a Debug Adapter Protocol request over the kernel control channel. The
+kernel must advertise `"debugger"` in its supported features.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `request` | `object` | Yes | — | DAP request payload expected by the kernel |
+
+**Returns:** `ok`, `response`, or a capability error
 
 ---
 

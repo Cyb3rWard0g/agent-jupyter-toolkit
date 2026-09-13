@@ -1,7 +1,7 @@
 # Kernel-side dependencies for the Jupyter quickstart image.
 # These are installed into the same Python environment used by notebook kernels.
 
-jupyter-collaboration>=4.1.1
+jupyter-collaboration>=5.0.0
 
 pandas
 matplotlib

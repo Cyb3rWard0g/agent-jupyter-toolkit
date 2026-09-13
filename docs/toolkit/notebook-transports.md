@@ -20,11 +20,13 @@ await transport.is_connected()
 await transport.fetch()              # → nbformat dict
 await transport.save(content)
 await transport.append_code_cell(source, metadata=None, tags=None)
+await transport.append_code_cell_with_id(source, metadata=None, tags=None)
 await transport.insert_code_cell(index, source, metadata=None, tags=None)
 await transport.append_markdown_cell(source, tags=None)
 await transport.insert_markdown_cell(index, source, tags=None)
 await transport.update_cell_outputs(index, outputs, execution_count)
 await transport.set_cell_source(index, source)
+await transport.set_cell_source_by_id(cell_id, source, expected_source=None)
 await transport.get_cell(index)
 await transport.cell_count()
 await transport.get_cell_source(index)
@@ -32,6 +34,9 @@ await transport.delete_cell(index)
 await transport.resolve_cell_index(cell_id)
 await transport.get_cell_by_id(cell_id)
 await transport.move_cell(from_index, to_index)
+await transport.get_metadata()
+await transport.update_metadata(updates)
+await transport.update_metadata_map(key, updates, removals=None)
 transport.on_change(callback)
 ```
 
@@ -60,6 +65,9 @@ transport = make_document_transport(
 Features:
 - Thread-safe read/write via asyncio lock
 - Atomic saves (write to temp file, then rename)
+- Full nbformat validation before replacing the file
+- Stable cell-ID and expected-source checks for output persistence
+- Atomic append/source-by-ID mutations for execution workflows
 - Optional **debounced autosave** — batches rapid edits into a single write
 - Path security via configurable allowlist (see [Configuration](configuration.md))
 
@@ -102,6 +110,13 @@ Features:
 - `PUT /api/contents/{path}` for save
 - Token and cookie-based authentication
 - Automatic notebook creation via PUT when `create_if_missing=True`
+- Candidate validation before PUT and snapshot-bound freshness checks for `NotebookBuffer`
+- Stable cell IDs captured in the serialized append mutation
+
+Contents freshness checks use a GET followed by a PUT, so they cannot provide an
+atomic compare-and-swap against another writer. Use collaboration mode for
+concurrent editing. A buffer retains the revision from its own `load()` call;
+another reader cannot refresh that buffer's revision implicitly.
 
 ### 3. Collaborative Yjs/CRDT Transport
 
@@ -117,6 +132,7 @@ transport = make_document_transport(
     token="YOUR_TOKEN",
     headers_json=None,
     prefer_collab=True,
+    collaboration_mode="preferred",
     create_if_missing=True,
 )
 ```
@@ -125,10 +141,26 @@ Features:
 - Real-time document sync via Yjs/CRDT (pycrdt)
 - Conflict-free concurrent editing from multiple clients
 - Cell mutations applied as CRDT operations (merge, don't overwrite)
+- Output updates mutate the shared cell's output array and execution count in
+  place, preserving concurrent source and metadata edits
+- State-vector deltas whose baseline advances only after a successful send;
+  failed WebSocket sends remain retryable and propagate to the caller
 - **Awareness protocol** — broadcast presence metadata (cursors, user info)
 - Automatic reconnection and state recovery
-- **Default empty cell stripping** — JupyterLab adds a blank code cell to every new notebook; the transport removes it on `start()` so the notebook begins truly empty
-- Falls back to Contents API transport if `prefer_collab=False`
+- **Default empty cell stripping** — only a notebook created by this client has
+  its untouched, metadata-free placeholder removed; meaningful blank cells are
+  preserved
+- Required/preferred/disabled selection with classified preferred-mode fallback
+- Shared notebook metadata uses per-key CRDT updates. Mapping-valued fields can
+  also use entry-level shared maps, so separate agents installing different
+  dependencies converge without replacing the dependency manifest
+
+`collaboration_mode="required"` propagates every collaboration startup error.
+`"preferred"` falls back to Contents only for an unsupported collaboration API
+(HTTP 400, 404, 405, 426, or 501). Authentication, permission, malformed-response,
+and transient connection failures retain their original errors. `"disabled"`
+uses Contents directly. The older `prefer_collab` boolean maps to preferred or
+disabled when no explicit mode is supplied.
 
 #### Awareness (presence metadata)
 
@@ -175,16 +207,18 @@ transport = make_document_transport(
     token=...,
     headers_json=...,
     prefer_collab=False,
+    collaboration_mode=None,
     create_if_missing=False,
     local_autosave_delay=None,
 )
 ```
 
-| `mode` | `prefer_collab` | Result |
+| `mode` | Collaboration mode | Result |
 |--------|----------------|--------|
 | `"local"` | — | `LocalFileDocumentTransport` |
-| `"server"` | `False` | `ContentsApiDocumentTransport` |
-| `"server"` | `True` | `CollabYjsDocumentTransport` |
+| `"server"` | `disabled` | `ContentsApiDocumentTransport` |
+| `"server"` | `preferred` | Collaboration with classified Contents fallback |
+| `"server"` | `required` | `CollabYjsDocumentTransport`; no fallback |
 | invalid config | — | No-op fallback transport |
 
 ## NotebookSession
@@ -229,15 +263,57 @@ async with NotebookSession(kernel=kernel, doc=doc) as nb:
 | `restart_and_run_all(stop_on_error=True, timeout=None)` | `RunAllResult` | Restart kernel, then run all code cells from a clean state |
 | `is_connected()` | `bool` | Both kernel and document are live |
 
+Append, existing-cell execution, markdown insertion, run-all, and
+restart-and-run-all are serialized per `NotebookSession`. An appended cell's ID
+is captured in the append mutation, and existing-cell source replacement
+resolves and checks the original ID in the write mutation. Output delivery
+therefore stays attached to the intended cell when another client inserts or
+moves cells.
+
 ### Streaming behavior
 
 During execution, outputs are streamed to the document cell in real time:
 
-1. Each IOPub message updates the cell immediately (delta or full replace)
+1. Ordered IOPub state snapshots update the cell during execution
 2. Execution count changes propagate to the cell
-3. `clear_output` messages clear accumulated outputs
+3. Deferred clears wait for replacement output and display IDs update in place
 4. A final authoritative write with normalized nbformat outputs happens at the
    end of execution
+
+The cell ID and original source are checked on every write. If the cell is
+deleted or edited while code runs, execution remains successful but the result
+contains `persistence_status="error"` and the conflict; output is never redirected
+to the cell that later occupies the same numeric index. Cross-cell display update
+failures are reported through the same persistence fields.
+
+A failed collaboration send uses the same result contract: kernel execution may
+still have `status="ok"` while `persistence_status="error"` identifies the
+delivery failure.
+
+Display handles can target several cells. Rerunning a target cell, replacing its
+outputs, or restarting the kernel invalidates its old display registrations.
+Run-all results retain each cell's persistence and timeout details; the aggregate
+status is an error if either execution or persistence fails.
+
+## Validation and normalization
+
+Transport saves validate a deep copy and never repair the caller's notebook as
+a side effect. Duplicate cell IDs and other schema violations fail before a
+local atomic replace or Contents API PUT.
+
+Repairs are explicit:
+
+```python
+from agent_jupyter_toolkit.notebook.utils import normalize_notebook, validate_notebook
+
+validate_notebook(notebook)  # raises; does not mutate notebook
+changes, repaired = normalize_notebook(notebook)
+if changes:
+    await transport.save(repaired)
+```
+
+This makes generated cell IDs and stripped invalid metadata visible before
+data is written.
 
 ## NotebookBuffer
 

@@ -5,17 +5,30 @@ This module provides simplified functions for executing code and managing
 notebook workflows with sensible defaults and error handling.
 """
 
-import asyncio
 import logging
 import time
+from typing import Any
 
-from ..kernel.types import ExecutionResult
+from ..kernel.types import ExecutionResult, KernelDisconnectedError
 from ..notebook.session import NotebookSession
 from ..notebook.types import NotebookCodeExecutionResult, NotebookMarkdownCellResult
 from ..notebook.utils import to_nbformat_outputs
 from .outputs import extract_outputs, format_output, has_error
 
 logger = logging.getLogger(__name__)
+
+
+def _disconnected_result(
+    exc: KernelDisconnectedError, cell_index: int, elapsed: float, format_outputs: bool
+) -> NotebookCodeExecutionResult:
+    result = exc.partial_result or ExecutionResult()
+    result.status = "error"
+    result.outcome = "unknown"
+    converted = convert_to_notebook_result(
+        result, cell_index, elapsed_seconds=elapsed, format_outputs=format_outputs
+    )
+    converted.error_message = f"{type(exc).__name__}: {exc}"
+    return converted
 
 
 def convert_to_notebook_result(
@@ -62,11 +75,29 @@ def convert_to_notebook_result(
         formatted_output=formatted_output,
         error_message=error_message,
         elapsed_seconds=elapsed_seconds,
+        cell_id=result.cell_id,
+        persistence_status=result.persistence_status,
+        persistence_error=result.persistence_error,
+        request_id=result.request_id,
+        source_hash=result.source_hash,
+        kernel_generation=result.kernel_generation,
+        output_truncated=result.output_truncated,
+        dropped_output_bytes=result.dropped_output_bytes,
+        callback_snapshots_coalesced=result.callback_snapshots_coalesced,
+        callback_status=result.callback_status,
+        callback_error=result.callback_error,
+        outcome=result.outcome,
+        timed_out=result.timed_out,
     )
 
 
 async def execute_code(
-    kernel_session, code: str, *, timeout: float | None = 120.0, format_outputs: bool = True
+    kernel_session,
+    code: str,
+    *,
+    timeout: float | None = 120.0,
+    format_outputs: bool = True,
+    subshell_id: str | None = None,
 ) -> NotebookCodeExecutionResult:
     """
     Execute code in a kernel session with automatic output processing.
@@ -103,10 +134,7 @@ async def execute_code(
 
         logger.debug("Executing code in kernel session")
 
-        if timeout:
-            result = await asyncio.wait_for(kernel_session.execute(code), timeout=timeout)
-        else:
-            result = await kernel_session.execute(code)
+        result = await kernel_session.execute(code, timeout=timeout, subshell_id=subshell_id)
 
         elapsed = time.time() - start_time
         logger.debug(f"Code execution completed in {elapsed:.2f}s, status: {result.status}")
@@ -120,6 +148,8 @@ async def execute_code(
             result, cell_index=-1, elapsed_seconds=elapsed, format_outputs=format_outputs
         )
 
+    except KernelDisconnectedError as exc:
+        return _disconnected_result(exc, -1, time.time() - start_time, format_outputs)
     except TimeoutError:
         elapsed = time.time() - start_time
         return NotebookCodeExecutionResult(
@@ -133,6 +163,8 @@ async def execute_code(
             formatted_output="",
             error_message=f"Execution timed out after {timeout}s",
             elapsed_seconds=elapsed,
+            outcome="unknown",
+            timed_out=True,
         )
 
     except Exception as e:
@@ -198,6 +230,8 @@ async def invoke_code_cell(
 
         return nb_result
 
+    except KernelDisconnectedError as exc:
+        return _disconnected_result(exc, -1, time.time() - start_time, format_outputs)
     except TimeoutError:
         elapsed = time.time() - start_time
         return NotebookCodeExecutionResult(
@@ -211,6 +245,8 @@ async def invoke_code_cell(
             formatted_output="",
             error_message=f"Execution timed out after {timeout}s",
             elapsed_seconds=elapsed,
+            outcome="unknown",
+            timed_out=True,
         )
 
     except Exception as e:
@@ -300,7 +336,7 @@ async def invoke_notebook_cells(
 
 
 # Session information and variable utilities
-async def get_session_info(session) -> dict[str, any]:
+async def get_session_info(session) -> dict[str, Any]:
     """
     Get basic information about a kernel session.
 
@@ -320,6 +356,12 @@ async def get_session_info(session) -> dict[str, any]:
         "alive": await session.is_alive(),
         "connection_info": "N/A",
     }
+
+    session_info = getattr(session, "session_info", None)
+    if callable(session_info):
+        from dataclasses import asdict
+
+        info.update(asdict(session_info()))
 
     # Add kernel manager info if available (local sessions)
     if hasattr(session, "kernel_manager") and session.kernel_manager:
@@ -351,10 +393,10 @@ async def get_variables(session) -> list[str]:
         return await var_manager.list()
     except Exception as e:
         logger.warning(f"Could not list variables: {e}")
-        return []
+        raise
 
 
-async def get_variable_value(session, name: str) -> any:
+async def get_variable_value(session, name: str) -> Any:
     """
     Get the value of a specific variable from the kernel session.
 
@@ -376,7 +418,7 @@ async def get_variable_value(session, name: str) -> any:
         return await var_manager.get(name)
     except Exception as e:
         logger.warning(f"Could not get variable '{name}': {e}")
-        return None
+        raise
 
 
 async def invoke_existing_cell(
@@ -416,12 +458,7 @@ async def invoke_existing_cell(
     try:
         await notebook_session.start()
 
-        if timeout:
-            result = await asyncio.wait_for(
-                notebook_session.run_at(cell_index, code), timeout=timeout
-            )
-        else:
-            result = await notebook_session.run_at(cell_index, code)
+        result = await notebook_session.run_at(cell_index, code, timeout=timeout)
 
         elapsed = time.time() - start_time
 
@@ -429,6 +466,8 @@ async def invoke_existing_cell(
             result, cell_index=cell_index, elapsed_seconds=elapsed, format_outputs=format_outputs
         )
 
+    except KernelDisconnectedError as exc:
+        return _disconnected_result(exc, cell_index, time.time() - start_time, format_outputs)
     except TimeoutError:
         elapsed = time.time() - start_time
         return NotebookCodeExecutionResult(
@@ -442,6 +481,8 @@ async def invoke_existing_cell(
             formatted_output="",
             error_message=f"Execution timed out after {timeout}s",
             elapsed_seconds=elapsed,
+            outcome="unknown",
+            timed_out=True,
         )
 
     except Exception as e:

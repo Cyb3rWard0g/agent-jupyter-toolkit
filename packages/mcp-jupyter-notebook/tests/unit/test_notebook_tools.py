@@ -9,15 +9,15 @@ with a mock Context.
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
 
-from agent_jupyter_toolkit.kernel.types import HistoryEntry, HistoryResult
+from agent_jupyter_toolkit.kernel.types import HistoryEntry, HistoryResult, SessionInfo
 from agent_jupyter_toolkit.notebook.types import (
     CellRunResult,
     NotebookCodeExecutionResult,
     NotebookMarkdownCellResult,
     RunAllResult,
 )
+from mcp_jupyter_notebook._mcp import FastMCP
 from mcp_jupyter_notebook.tools import register_notebook_tools
 
 
@@ -70,11 +70,42 @@ def test_register_notebook_tools_registers_expected_tools(mcp_server):
         "notebook_code_is_complete",
         "notebook_kernel_history",
         "notebook_kernel_restart",
+        "notebook_subshell_create",
+        "notebook_subshell_list",
+        "notebook_subshell_delete",
+        "notebook_debug_request",
         "notebook_variables_list",
         "notebook_variable_get",
         "notebook_variable_set",
     }
     assert expected.issubset(tool_names), f"Missing tools: {expected - tool_names}"
+
+
+@pytest.mark.asyncio
+async def test_notebook_session_info_reports_ownership_and_document_transport(mock_ctx):
+    session = mock_ctx.request_context.lifespan_context.session
+    session.kernel.session_info.return_value = SessionInfo(
+        transport="server",
+        kernel_id="kernel-1",
+        server_session_id="session-1",
+        owns_kernel=False,
+    )
+    manager = mock_ctx.request_context.lifespan_context.manager
+    manager.document_transport_info.return_value = {
+        "document_transport": "contents",
+        "collaboration_mode": "preferred",
+        "collaboration_fallback_reason": "collaboration API returned HTTP 404",
+    }
+
+    server = FastMCP("test")
+    register_notebook_tools(server)
+    tool = server._tool_manager._tools["notebook_session_info"]
+    result = await tool.fn(ctx=mock_ctx)
+
+    assert result["kernel_id"] == "kernel-1"
+    assert result["owns_kernel"] is False
+    assert result["document_transport"] == "contents"
+    assert result["collaboration_fallback_reason"].endswith("404")
 
 
 @pytest.mark.asyncio
@@ -132,7 +163,8 @@ async def test_notebook_code_run(monkeypatch, mock_ctx):
 
 
 @pytest.mark.asyncio
-async def test_notebook_cells_run_includes_cell_ids(monkeypatch, mock_ctx):
+@pytest.mark.parametrize("captured_id", [None, "original-cell-id"])
+async def test_notebook_cells_run_includes_cell_ids(monkeypatch, mock_ctx, captured_id):
     """Test notebook_cells_run resolves stable IDs with one notebook fetch."""
     mock_results = [
         NotebookMarkdownCellResult(
@@ -145,6 +177,11 @@ async def test_notebook_cells_run_includes_cell_ids(monkeypatch, mock_ctx):
             status="ok",
             execution_count=1,
             cell_index=1,
+            cell_id=captured_id,
+            outcome="unknown",
+            timed_out=True,
+            persistence_status="error",
+            persistence_error="changed source",
             stdout="hi\n",
             stderr="",
             outputs=[],
@@ -179,7 +216,10 @@ async def test_notebook_cells_run_includes_cell_ids(monkeypatch, mock_ctx):
         ctx=mock_ctx,
     )
     assert result[0]["cell_id"] == "cell-md"
-    assert result[1]["cell_id"] == "cell-code"
+    assert result[1]["cell_id"] == (captured_id or "cell-code")
+    assert result[1]["outcome"] == "unknown"
+    assert result[1]["timed_out"]
+    assert result[1]["persistence_error"] == "changed source"
     mock_ctx.request_context.lifespan_context.session.doc.fetch.assert_awaited_once()
 
 
@@ -712,6 +752,21 @@ async def test_notebook_files_list(mock_ctx):
     mock_ctx.request_context.lifespan_context.manager.list_notebook_files.assert_awaited_once_with(
         directory=".", recursive=True
     )
+
+
+@pytest.mark.asyncio
+async def test_notebook_files_list_reports_remote_errors(mock_ctx):
+    """A failed Contents request must not look like a successful empty directory."""
+    mock_ctx.request_context.lifespan_context.manager.list_notebook_files = AsyncMock(
+        side_effect=RuntimeError("GET contents failed (403): permission denied")
+    )
+    server = FastMCP("test")
+    register_notebook_tools(server)
+
+    tool = server._tool_manager._tools["notebook_files_list"]
+    result = await tool.fn(ctx=mock_ctx, directory="restricted", recursive=False)
+
+    assert result == {"ok": False, "error": "GET contents failed (403): permission denied"}
 
 
 @pytest.mark.asyncio

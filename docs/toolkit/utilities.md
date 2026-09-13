@@ -62,7 +62,7 @@ doc = create_notebook_transport(
 doc = create_notebook_transport(
     "remote", "shared.ipynb",
     base_url="http://localhost:8888",
-    prefer_collab=True,
+    collaboration_mode="preferred",
 )
 ```
 
@@ -76,6 +76,7 @@ doc = create_notebook_transport(
 | `token` | `str \| None` | `None` | API token (remote only) |
 | `headers` | `dict \| None` | `None` | Extra headers (remote only) |
 | `prefer_collab` | `bool` | `False` | Use Yjs transport if available |
+| `collaboration_mode` | `str \| None` | `None` | Required, preferred, or disabled; overrides `prefer_collab` |
 | `create_if_missing` | `bool` | `True` | Create notebook if absent |
 | `local_autosave_delay` | `float \| None` | `None` | Debounce delay in seconds |
 
@@ -229,11 +230,18 @@ Manage pip packages in the kernel environment:
 ```python
 from agent_jupyter_toolkit.utils import check_package_availability
 
-status = await check_package_availability(kernel, ["pandas", "numpy", "plotly"])
-# → {"pandas": True, "numpy": True, "plotly": False}
+status = await check_package_availability(
+    kernel,
+    ["pandas>=2", "numpy; python_version >= '3.11'", "plotly[express]"],
+)
 ```
 
-Uses `importlib.metadata` for accurate distribution-level checks.
+Inputs are parsed as PEP 508 requirements before any kernel code runs. Checks
+use the distribution installed in the kernel and honor version specifiers,
+environment markers, requested extras, and the dependencies activated by those
+extras. Invalid requirements and direct URL references raise `ValueError`;
+package operations require a distribution name with an optional version,
+extras, and marker expression.
 
 ### `ensure_packages()`
 
@@ -277,17 +285,30 @@ result = await ensure_packages_with_report(kernel, ["pandas", "plotly", "seaborn
 # → {
 #     "success": True,
 #     "report": {
-#         "pandas": {"already_available": True, "installed": False, "failed": False},
-#         "plotly": {"already_available": False, "installed": True, "failed": False},
-#         "seaborn": {"already_available": False, "installed": True, "failed": False},
+#         "pandas": {
+#             "already": True,
+#             "installed": False,
+#             "success": True,
+#             "python": "/path/to/kernel/python",
+#             "installer": None,
+#         },
 #     }
 # }
 ```
 
 Returns a dict with `"success"` (overall bool) and `"report"` (per-package
-status). Each package entry includes `already_available`, `installed`, and
-`failed` flags. This is the recommended function for agent workflows because
-it gives full visibility into what happened with each package.
+status). Each package entry includes `already`, `installed`, `success`, error
+details, the kernel interpreter, and the selected installer. uv receives that
+kernel's `sys.executable` through `--python`; the pip fallback uses the same
+interpreter. A remote kernel is never labeled with or modified through the
+agent process's interpreter.
+
+`NotebookSession.install_packages()` stores dependencies under their canonical
+distribution name and records both the requested requirement and resolved
+version. Uninstall accepts a full requirement but checks installation and
+removal by its parsed distribution name, regardless of whether the installed
+version satisfies the supplied constraint. It passes only that name to pip/uv
+and removes matching tracked entries.
 
 ### Pre-defined package groups
 

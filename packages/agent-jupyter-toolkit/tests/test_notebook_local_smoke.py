@@ -63,3 +63,45 @@ async def test_local_notebook_restart_and_run_all_reexecutes_from_clean_kernel(t
         output.get("output_type") == "stream" and "42" in output.get("text", "")
         for output in nb.cells[2]["outputs"]
     )
+
+
+async def test_display_update_from_later_cell_updates_original_cell(tmp_path, monkeypatch):
+    notebook_path = tmp_path / "cross-cell-display.ipynb"
+    session = NotebookSession(
+        kernel=create_session(SessionConfig(mode="local", kernel_name="python3")),
+        doc=make_document_transport(
+            mode="local",
+            local_path=str(notebook_path),
+            remote_base=None,
+            remote_path=None,
+            token=None,
+            headers_json=None,
+            create_if_missing=True,
+        ),
+    )
+
+    async with session:
+        await session.append_and_run(
+            "from IPython.display import display\nhandle = display('before', display_id=True)"
+        )
+        _, result = await session.append_and_run("handle.update('after')")
+        assert result.persistence_status == "ok"
+
+        first_cell = await session.doc.get_cell(0)
+        update_outputs = session.doc.update_cell_outputs_by_id
+
+        async def fail_original_cell(cell_id, *args, **kwargs):
+            if cell_id == first_cell["id"]:
+                raise OSError("simulated persistence failure")
+            return await update_outputs(cell_id, *args, **kwargs)
+
+        monkeypatch.setattr(session.doc, "update_cell_outputs_by_id", fail_original_cell)
+        _, failed_update = await session.append_and_run("handle.update('unpersisted')")
+
+        assert failed_update.status == "ok"
+        assert failed_update.persistence_status == "error"
+        assert "simulated persistence failure" in (failed_update.persistence_error or "")
+
+    notebook = nbformat.read(notebook_path, as_version=4)
+    assert len(notebook.cells[0].outputs) == 1
+    assert "after" in notebook.cells[0].outputs[0]["data"]["text/plain"]

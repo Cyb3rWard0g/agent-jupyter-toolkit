@@ -28,7 +28,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: uv sync --all-packages --dev
+        run: uv sync --locked --all-packages --all-extras --dev
 
       - name: Ruff check
         run: uv run ruff check packages/
@@ -36,9 +36,63 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check packages/
 
+  test-built-packages:
+    name: Test built toolkit and MCP wheels
+    runs-on: ubuntu-latest
+    env:
+      SETUPTOOLS_SCM_PRETEND_VERSION: "0.8.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build tools
+        run: uv sync --locked --all-packages --all-extras --dev
+
+      - name: Build wheel pair
+        run: |
+          uv run python -m build --wheel \
+            --outdir "$RUNNER_TEMP/toolkit-dist" \
+            packages/agent-jupyter-toolkit
+          uv run python -m build --wheel \
+            --outdir "$RUNNER_TEMP/mcp-dist" \
+            packages/mcp-jupyter-notebook
+
+      - name: Install wheels outside the workspace
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-env"
+          uv pip install \
+            --python "$RUNNER_TEMP/wheel-env/bin/python" \
+            "$RUNNER_TEMP/toolkit-dist"/*.whl \
+            "$RUNNER_TEMP/mcp-dist"/*.whl
+
+      - name: Verify versions and workspace imports
+        run: |
+          "$RUNNER_TEMP/wheel-env/bin/python" - <<'PY'
+          from importlib.metadata import version
+
+          from agent_jupyter_toolkit.notebook import NotebookWorkspace
+          from mcp_jupyter_notebook.context import SessionManager
+
+          assert version("agent-jupyter-toolkit") == "0.8.0"
+          assert version("mcp-jupyter-notebook") == "0.8.0"
+          assert NotebookWorkspace.__name__ == "NotebookWorkspace"
+          assert SessionManager.__name__ == "SessionManager"
+          PY
+
   test-toolkit:
     name: Test agent-jupyter-toolkit (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
@@ -57,7 +111,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-packages --dev
+        run: uv sync --locked --all-packages --all-extras --dev
 
       - name: Run tests
         working-directory: packages/agent-jupyter-toolkit
@@ -66,6 +120,8 @@ jobs:
   test-mcp:
     name: Test mcp-jupyter-notebook (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
@@ -84,8 +140,182 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-packages --dev
+        run: uv sync --locked --all-packages --all-extras --dev
 
       - name: Run tests
         working-directory: packages/mcp-jupyter-notebook
         run: uv run pytest --tb=short -q
+
+  test-server-integration:
+    name: Test real Jupyter Server transport
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install integration dependencies
+        run: uv sync --locked --all-packages --all-extras --dev
+
+      - name: Start isolated Jupyter Server
+        run: |
+          mkdir -p "$RUNNER_TEMP/jat-server-root"
+          uv run jupyter server \
+            --no-browser \
+            --IdentityProvider.token=jat-token \
+            --ServerApp.root_dir="$RUNNER_TEMP/jat-server-root" \
+            --ServerApp.port=8899 \
+            --ServerApp.port_retries=0 \
+            >"$RUNNER_TEMP/jat-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/jat-server.pid"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent "http://127.0.0.1:8899/api/status?token=jat-token" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/jat-server.log"
+          exit 1
+
+      - name: Run server transport tests
+        env:
+          JAT_SERVER_URL: http://127.0.0.1:8899
+          JAT_SERVER_TOKEN: jat-token
+          JAT_COLLAB_URL: http://127.0.0.1:8899
+          JAT_COLLAB_TOKEN: jat-token
+        run: |
+          uv run pytest \
+            packages/agent-jupyter-toolkit/tests/test_transport_server_smoke.py \
+            packages/agent-jupyter-toolkit/tests/test_collaboration_server_smoke.py \
+            -q
+
+      - name: Stop Jupyter Server
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/jat-server.pid"; then
+            kill "$(cat "$RUNNER_TEMP/jat-server.pid")" || true
+          fi
+          cat "$RUNNER_TEMP/jat-server.log" || true
+
+  test-dependency-resolution:
+    name: Test ${{ matrix.resolution }} direct dependencies
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        resolution: [lowest-direct, latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Resolve dependencies
+        run: |
+          if test "${{ matrix.resolution }}" = "latest"; then
+            uv lock --upgrade
+          else
+            uv lock --upgrade --resolution lowest-direct
+          fi
+          uv sync --frozen --all-packages --all-extras --dev
+
+      - name: Run toolkit tests
+        run: uv run --frozen pytest packages/agent-jupyter-toolkit/tests -q
+
+      - name: Run MCP tests
+        run: uv run --frozen pytest packages/mcp-jupyter-notebook/tests -q
+
+      - name: Publish resolved inventory
+        if: failure()
+        run: uv tree
+
+  test-install-contracts:
+    name: Test ${{ matrix.feature }} install contract
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [core, local, dataframe, batch]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Create isolated feature environment
+        run: |
+          python -m venv "$RUNNER_TEMP/feature-env"
+          if test "${{ matrix.feature }}" = "core"; then
+            uv pip install --python "$RUNNER_TEMP/feature-env/bin/python" ./packages/agent-jupyter-toolkit
+          else
+            uv pip install --python "$RUNNER_TEMP/feature-env/bin/python" "./packages/agent-jupyter-toolkit[${{ matrix.feature }}]"
+          fi
+
+      - name: Verify feature imports
+        run: |
+          "$RUNNER_TEMP/feature-env/bin/python" -c "import agent_jupyter_toolkit"
+          case "${{ matrix.feature }}" in
+            local) "$RUNNER_TEMP/feature-env/bin/python" -c "import ipykernel" ;;
+            dataframe) "$RUNNER_TEMP/feature-env/bin/python" -c "import pandas, pyarrow" ;;
+            batch) "$RUNNER_TEMP/feature-env/bin/python" -c "import nbclient" ;;
+          esac
+
+      - name: Launch local-extra kernel
+        if: matrix.feature == 'local'
+        run: |
+          "$RUNNER_TEMP/feature-env/bin/python" - <<'PY'
+          import asyncio
+          from agent_jupyter_toolkit.kernel import create_session
+
+          async def check():
+              async with create_session() as session:
+                  result = await session.execute("40 + 2")
+                  assert result.status == "ok"
+
+          asyncio.run(check())
+          PY
+
+  test-local-platforms:
+    name: Test local lifecycle on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --locked --all-packages --all-extras --dev
+
+      - name: Run local lifecycle tests
+        run: >-
+          uv run pytest
+          packages/agent-jupyter-toolkit/tests/test_kernel_basic.py
+          packages/agent-jupyter-toolkit/tests/test_kernel_configuration.py
+          packages/agent-jupyter-toolkit/tests/test_kernel_streaming_and_attach.py
+          -q

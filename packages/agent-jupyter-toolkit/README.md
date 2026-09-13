@@ -9,14 +9,19 @@ A Python toolkit for building agent tools that interact with Jupyter kernels and
 - **Async-first kernel sessions** with pluggable transports:
   - **Local transport** — direct ZMQ communication with local kernel processes
   - **Server transport** — HTTP REST + WebSocket to remote Jupyter servers
-- **Code execution** with real-time streaming output callbacks
+- **Code execution** with bounded, coalesced streaming callbacks and separate callback diagnostics
+- **Notebook-compatible output state** for deferred clears, display updates, stream coalescing, and bounded output
 - **Kernel introspection** — tab-completion, object inspection, code-completeness checks, and execution history retrieval
-- **Kernel control** — interrupt running cells, restart kernels, query kernel metadata (language, version, protocol)
-- **Variable management** — inspect and set kernel variables safely (base64-encoded payloads)
+- **Kernel control** — interrupt/restart, query metadata, and capability-gated debugger and subshell workflows
+- **Ownership-aware lifecycle** — normal shutdown preserves attached/borrowed kernels
+- **Variable management** — inspect and set strict JSON values through base64-encoded payloads
 - **Extensible hooks** — pre/post execution and output hooks for instrumentation
 
 ### Notebook
 
+- **Multi-notebook workspaces:** `NotebookWorkspace` manages open sessions and a
+  default notebook from Python. Switching defaults preserves other live sessions.
+  See the [workspace API](../../docs/toolkit/api-reference.md#notebookworkspace-and-notebookworkspaceconfig).
 - **Multiple notebook transports:**
   - **Local file transport** — filesystem-backed notebooks with thread-safe read/write
   - **Contents API transport** — Jupyter Server-managed notebooks via REST
@@ -25,6 +30,8 @@ A Python toolkit for building agent tools that interact with Jupyter kernels and
 - **In-memory notebook buffer** for staged edits with explicit commit
 - **Local notebook autosave** with optional debounced writes
 - **Change observers** — register callbacks for cell mutations, saves, and awareness events
+- **Validated persistence** with atomic stable-cell identity, explicit normalization, and source/persistence conflicts
+- **Optional batch execution and trust inspection** through public nbclient/nbformat APIs
 
 ## Use Cases
 
@@ -44,20 +51,26 @@ pip install agent-jupyter-toolkit
 # Install optional DataFrame serialization support
 pip install agent-jupyter-toolkit[dataframe]
 
+# Include a managed local Python kernel
+pip install agent-jupyter-toolkit[local]
+
+# Include the nbclient batch executor
+pip install agent-jupyter-toolkit[batch]
+
 # Or using uv
 uv pip install agent-jupyter-toolkit
 ```
 
-Install the `dataframe` extra only if you want pandas/Arrow-backed DataFrame
-serialization and inspection helpers. Core kernel and notebook features do not
-require it.
+The `local` extra installs ipykernel, `batch` installs nbclient, and `dataframe`
+installs pandas/Arrow serialization support. The `integration` extra is for
+maintainers running the real Jupyter Server and collaboration tests.
 
 ### Development (monorepo)
 
 ```sh
 git clone https://github.com/Cyb3rWard0g/agent-jupyter-toolkit.git
 cd agent-jupyter-toolkit
-uv sync --all-packages
+uv sync --all-packages --all-extras --dev
 ```
 
 This installs both `agent-jupyter-toolkit` and `mcp-jupyter-notebook` in
@@ -74,6 +87,7 @@ local kernel process for you (via `jupyter_client`) and connects over ZMQ.
 import asyncio
 from agent_jupyter_toolkit.kernel import SessionConfig, create_session
 
+
 async def main() -> None:
     async with create_session(SessionConfig(mode="local", kernel_name="python3")) as session:
         result = await session.execute(
@@ -84,6 +98,7 @@ async def main() -> None:
         )
     print("status:", result.status)
     print("stdout:", result.stdout.strip())
+
 
 asyncio.run(main())
 ```
@@ -116,6 +131,7 @@ async with create_session() as session:
 
     # Interrupt a long-running cell
     import asyncio
+
     task = asyncio.create_task(session.execute("import time; time.sleep(999)"))
     await asyncio.sleep(1)
     await session.interrupt()
@@ -130,14 +146,18 @@ For server-backed and notebook scenarios, see the [quickstarts/](quickstarts/) d
 | Method | Description |
 |---|---|
 | `execute(code, *, timeout, output_callback, ...)` | Execute code with optional streaming callbacks |
+| `debug(request)` | Send a DAP request when the kernel advertises debugger support |
+| `create_subshell()` / `list_subshells()` / `delete_subshell()` | Manage advertised kernel subshells |
 | `interrupt()` | Send SIGINT to cancel running execution |
 | `complete(code, cursor_pos)` | Tab-completion suggestions |
 | `inspect(code, cursor_pos, detail_level)` | Object documentation/signature |
 | `is_complete(code)` | Syntax completeness check |
 | `history(*, output, raw, hist_access_type, n)` | Execution history retrieval |
 | `kernel_info()` | Kernel metadata (language, version, protocol) |
+| `session_info()` | Non-secret kernel/session IDs, ownership, generation, and encryption state |
 | `is_alive()` | Health check |
-| `start()` / `shutdown()` | Lifecycle management (also via `async with`) |
+| `start()` / `shutdown()` | Start and close; shutdown terminates only resources created by this client |
+| `shutdown_kernel()` | Explicitly terminate a kernel, including a borrowed one |
 
 ### Notebook Document Transport
 
@@ -146,10 +166,12 @@ For server-backed and notebook scenarios, see the [quickstarts/](quickstarts/) d
 | `fetch()` | Get notebook content as nbformat dict |
 | `save(content)` | Write notebook content |
 | `append_code_cell(source, metadata, tags)` | Append a code cell |
+| `append_code_cell_with_id(source, metadata, tags)` | Append and return its stable ID atomically |
 | `insert_code_cell(index, source, metadata, tags)` | Insert a code cell at index |
 | `append_markdown_cell(source, tags)` | Append a markdown cell |
 | `insert_markdown_cell(index, source, tags)` | Insert a markdown cell at index |
 | `set_cell_source(index, source)` | Update cell source text |
+| `set_cell_source_by_id(id, source, expected_source)` | Resolve, verify, and update source atomically |
 | `update_cell_outputs(index, outputs, execution_count)` | Replace cell outputs |
 | `delete_cell(index)` | Delete cell at index |
 | `on_change(callback)` | Register mutation observer |
@@ -173,6 +195,8 @@ agent_jupyter_toolkit
 │       └── server.py       # ServerTransport (HTTP+WS)
 ├── notebook/
 │   ├── session.py          # NotebookSession (kernel + document orchestration)
+│   ├── workspace.py        # Multi-notebook registry, default selection, lifecycle
+│   ├── _workspace_files.py # Private local and Contents API file operations
 │   ├── transport.py        # NotebookDocumentTransport protocol
 │   ├── factory.py          # make_document_transport() factory
 │   ├── buffer.py           # In-memory NotebookBuffer
@@ -194,8 +218,13 @@ agent_jupyter_toolkit
 | [jupyter-ydoc](https://pypi.org/project/jupyter-ydoc/) | YNotebook schema for collaborative editing |
 | [pycrdt](https://pypi.org/project/pycrdt/) | CRDT types (Doc, Array, Map, Text, Awareness) |
 | [nbformat](https://pypi.org/project/nbformat/) | Notebook file format handling |
+| [packaging](https://pypi.org/project/packaging/) | PEP 508 requirement and version checks |
 | [aiohttp](https://pypi.org/project/aiohttp/) | Async HTTP/WS for server transport |
 | [pandas](https://pypi.org/project/pandas/) + [pyarrow](https://pypi.org/project/pyarrow/) | Optional `dataframe` extra for DataFrame variable inspection |
+
+See the [API reference](../../docs/toolkit/api-reference.md) for execution result
+fields and optional APIs, and [configuration](../../docs/toolkit/configuration.md)
+for collaboration modes and local launch options.
 
 ## Contributing
 

@@ -84,24 +84,30 @@ print(json.dumps(user_vars))
     get_code="import json; print(json.dumps(globals().get('{name}', None), default=str))",
     set_code="import json; {name} = json.loads('''{value}''')",
     list_detailed_code="""
-import json
-import sys
+def _ajt_describe_variables(_ajt_namespace):
+    import json as _ajt_json
+    import sys as _ajt_sys
 
-_vars = []
-for _name, _obj in globals().items():
-    if _name.startswith("_"):
-        continue
-    if callable(_obj) or hasattr(_obj, "__module__"):
-        continue
-    _t = type(_obj)
-    _vars.append(
-        {
-            "name": _name,
-            "type": (getattr(_t, "__module__", None), getattr(_t, "__qualname__", "")),
-            "size": sys.getsizeof(_obj),
-        }
-    )
+    _ajt_vars = []
+    for _ajt_name, _ajt_obj in list(_ajt_namespace.items()):
+        if _ajt_name.startswith("_"):
+            continue
+        if callable(_ajt_obj) or hasattr(_ajt_obj, "__module__"):
+            continue
+        _ajt_type = type(_ajt_obj)
+        _ajt_vars.append(
+            {
+                "name": _ajt_name,
+                "type": [
+                    getattr(_ajt_type, "__module__", None),
+                    getattr(_ajt_type, "__qualname__", ""),
+                ],
+                "size": _ajt_sys.getsizeof(_ajt_obj),
+            }
+        )
+    return _ajt_json.dumps(_ajt_vars)
 
-print(json.dumps(_vars))
+print(_ajt_describe_variables(globals()))
+del _ajt_describe_variables
 """,
 )

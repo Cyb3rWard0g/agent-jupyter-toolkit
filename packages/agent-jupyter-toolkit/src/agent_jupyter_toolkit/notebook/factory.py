@@ -9,11 +9,24 @@ and collaborative Yjs transports, with automatic selection based on provided par
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from .transport import NotebookDocumentTransport
 from .transports.contents import ContentsApiDocumentTransport
 from .transports.local_file import LocalFileDocumentTransport
+
+CollaborationMode = Literal["required", "preferred", "disabled"]
+
+
+def _resolve_collaboration_mode(
+    collaboration_mode: str | None, prefer_collab: bool
+) -> CollaborationMode:
+    if collaboration_mode is None:
+        return "preferred" if prefer_collab else "disabled"
+    resolved = collaboration_mode.strip().lower()
+    if resolved not in {"required", "preferred", "disabled"}:
+        raise ValueError("collaboration_mode must be 'required', 'preferred', or 'disabled'")
+    return cast(CollaborationMode, resolved)
 
 
 def _parse_headers(headers_json: str | None) -> dict[str, str] | None:
@@ -38,6 +51,7 @@ def make_document_transport(
     token: str | None,
     headers_json: str | None,
     prefer_collab: bool = False,
+    collaboration_mode: str | None = None,
     create_if_missing: bool = False,
     local_autosave_delay: float | None = None,
 ) -> NotebookDocumentTransport:
@@ -56,7 +70,9 @@ def make_document_transport(
         remote_path: Notebook path relative to server root (e.g., notebooks/analysis.ipynb)
         token: Optional API token for server authentication
         headers_json: Optional JSON string of additional headers (cookies, XSRF, etc.)
-        prefer_collab: If True and available, use collaborative Yjs transport
+        prefer_collab: Compatibility alias for ``collaboration_mode="preferred"``
+        collaboration_mode: ``required``, ``preferred``, or ``disabled``. An explicit
+            value takes precedence over ``prefer_collab``.
         create_if_missing: If True, create the notebook file/resource if it doesn't exist
         local_autosave_delay: Optional debounce delay (seconds) for local file writes
 
@@ -98,6 +114,11 @@ def make_document_transport(
         scenarios).
     """
     mode = (mode or "").lower()
+    resolved_collaboration = _resolve_collaboration_mode(collaboration_mode, prefer_collab)
+    if collaboration_mode is not None and resolved_collaboration != "disabled" and mode != "server":
+        raise ValueError("collaboration_mode requires mode='server'")
+    if resolved_collaboration == "required" and (not remote_base or not remote_path):
+        raise ValueError("required collaboration needs remote_base and remote_path")
 
     if mode == "local" and local_path:
         return LocalFileDocumentTransport(local_path, autosave_delay=local_autosave_delay)
@@ -105,27 +126,43 @@ def make_document_transport(
     if mode == "server" and remote_path:
         headers = _parse_headers(headers_json)
 
-        if prefer_collab and remote_base:
+        if resolved_collaboration != "disabled" and remote_base:
             # Lazy import to avoid hard dependency on pycrdt for kernel-only use.
             from .transports.collab import CollabYjsDocumentTransport
+            from .transports.fallback import CollaborationFallbackTransport
 
-            # Use collaborative transport with built-in creation
-            return CollabYjsDocumentTransport(
+            collaboration = CollabYjsDocumentTransport(
                 remote_base,
                 remote_path,
                 token=token,
                 headers=headers,
                 create_if_missing=create_if_missing,
+            )
+            contents = ContentsApiDocumentTransport(
+                remote_base,
+                remote_path,
+                token=token,
+                headers=headers,
+                create_if_missing=create_if_missing,
+            )
+            if resolved_collaboration == "required":
+                collaboration.collaboration_mode = "required"
+                return cast(NotebookDocumentTransport, collaboration)
+            return cast(
+                NotebookDocumentTransport,
+                CollaborationFallbackTransport(collaboration, contents),
             )
 
         if remote_base:
-            return ContentsApiDocumentTransport(
+            contents = ContentsApiDocumentTransport(
                 remote_base,
                 remote_path,
                 token=token,
                 headers=headers,
                 create_if_missing=create_if_missing,
             )
+            contents.collaboration_mode = "disabled"
+            return contents
 
     # Missing configuration fallback (execution-only)
     class _NoopDoc:
@@ -175,6 +212,10 @@ def make_document_transport(
             """Append code cell (no-op), returns index 0."""
             return 0
 
+        async def append_code_cell_with_id(self, *args, **kwargs) -> tuple[int, str]:
+            """No-op documents cannot create stable notebook cells."""
+            raise RuntimeError("No notebook document is configured")
+
         async def insert_code_cell(self, *args, **kwargs) -> None:
             """Insert code cell (no-op)."""
             ...
@@ -194,6 +235,10 @@ def make_document_transport(
         async def set_cell_source(self, *args, **kwargs) -> None:
             """Set cell source (no-op)."""
             ...
+
+        async def set_cell_source_by_id(self, *args, **kwargs) -> int:
+            """No-op transport has no cells."""
+            raise KeyError("No notebook document is configured")
 
         async def delete_cell(self, *args, **kwargs) -> None:
             """Delete cell (no-op)."""

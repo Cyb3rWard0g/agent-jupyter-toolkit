@@ -110,6 +110,16 @@ def get_type_key(obj: Any) -> tuple[str, str]:
     return (getattr(t, "__module__", "*"), getattr(t, "__name__", "*"))
 
 
+def _normalize_type_key(value: Any) -> tuple[str, str] | None:
+    """Normalize a handler key after crossing a JSON boundary."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    module, cls = value
+    if not isinstance(module, str) or not isinstance(cls, str):
+        return None
+    return module, cls
+
+
 def serialize_object(obj: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Serialize an object to a MIME bundle and metadata.
@@ -145,13 +155,13 @@ def deserialize_object(data: dict[str, Any], metadata: dict[str, Any] | None = N
     """
     metadata = metadata or {}
     for mimetype, value in data.items():
-        typeinfo = metadata.get(mimetype, {}).get("type", (None, None))
-        handlers = MIMETYPE_HANDLERS.get(typeinfo, [])
+        typeinfo = _normalize_type_key(metadata.get(mimetype, {}).get("type"))
+        handlers = MIMETYPE_HANDLERS.get(typeinfo, []) if typeinfo else []
         for mt, _, deserializer in handlers:
             if mt == mimetype:
                 return deserializer(value, mimetype)
         if mimetype == "application/json":
-            return json.loads(value)
+            return json.loads(value) if isinstance(value, (str, bytes, bytearray)) else value
         if mimetype == "application/python-pickle":
             log.warning("Using pickle for deserialization. Only use with trusted data.")
             return pickle.loads(bytes.fromhex(value))

@@ -16,22 +16,27 @@ Key features:
 
 from __future__ import annotations
 
+import asyncio
 import os
+from collections.abc import Callable
 from typing import Any
 
 from jupyter_core.paths import jupyter_runtime_dir
 
+from ..callbacks import OutputCallbackDispatcher
+from ..execution_state import ExecutionState
+from ..history import decode_history_entries
 from ..hooks import kernel_hooks
 from ..manager import KernelManager
 from ..transport import KernelTransport
 from ..types import (
     CompleteResult,
     ExecutionResult,
-    HistoryEntry,
     HistoryResult,
     InspectResult,
     IsCompleteResult,
     KernelInfoResult,
+    UnsupportedKernelCapabilityError,
 )
 
 
@@ -60,6 +65,14 @@ class LocalTransport(KernelTransport):
         kernel_name: str = "python3",
         connection_file_name: str | None = None,
         packer: str | None = None,
+        startup_timeout: float = 60.0,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        kernel_args: list[str] | None = None,
+        max_output_bytes: int | None = 50 * 1024 * 1024,
+        output_callback_timeout: float | None = 30.0,
+        transport_encryption: str = "disabled",
+        manager_factory: Callable[..., KernelManager] | None = None,
     ) -> None:
         """
         Initialize local transport with kernel configuration.
@@ -76,12 +89,31 @@ class LocalTransport(KernelTransport):
             Connection files are typically in jupyter_runtime_dir() and follow
             format: kernel-{uuid}.json containing ZMQ port and key information.
         """
+        if connection_file_name and (
+            cwd is not None or env is not None or kernel_args or transport_encryption != "disabled"
+        ):
+            raise ValueError(
+                "cwd, env, kernel_args, and transport_encryption apply only when "
+                "launching a new kernel"
+            )
+
         # Initialize kernel manager with configuration
-        self._km = KernelManager(
+        manager_type = manager_factory or KernelManager
+        self._km = manager_type(
             kernel_name=kernel_name,
             connection_file_name=connection_file_name,
             packer=packer,
+            startup_timeout=startup_timeout,
+            cwd=cwd,
+            env=env,
+            kernel_args=kernel_args,
+            transport_encryption=transport_encryption,
         )
+        self._request_lock = asyncio.Lock()
+        self._control_lock = asyncio.Lock()
+        self._max_output_bytes = max_output_bytes
+        self._output_callback_timeout = output_callback_timeout
+        self._supported_features: set[str] | None = None
 
     @property
     def kernel_manager(self) -> KernelManager:
@@ -137,36 +169,25 @@ class LocalTransport(KernelTransport):
                 # Resolve relative paths against Jupyter runtime directory
                 cf_path = os.path.join(jupyter_runtime_dir(), cf_path)
 
-            # Prefer existing kernel if connection file exists
+            # An explicit attachment must never create a replacement kernel.
             if os.path.exists(cf_path):
                 await self._km.connect_to_existing(cf_path)
             else:
-                # Connection file not found, start fresh kernel
-                await self._km.start()
+                raise FileNotFoundError(f"Kernel connection file does not exist: {cf_path}")
         else:
             # No connection file specified, always start fresh
             await self._km.start()
 
         # Kernel is ready for direct execution
+        self._supported_features = None
 
     async def shutdown(self) -> None:
-        """
-        Shut down the local kernel and release all resources.
-
-        This method performs clean shutdown:
-        1. Terminates kernel process gracefully
-        2. Closes ZMQ connections
-        3. Releases system resources
-
-        The shutdown is fault-tolerant - it will attempt cleanup
-        even if the kernel is already dead or unresponsive.
-
-        Note:
-            After shutdown, this transport cannot be reused.
-            Create a new LocalTransport instance for further operations.
-        """
-        # Attempt graceful kernel shutdown
+        """Close channels and terminate only a kernel created by this client."""
         await self._km.shutdown()
+
+    async def shutdown_kernel(self) -> None:
+        """Explicitly terminate the kernel, including an attached kernel."""
+        await self._km.shutdown(force_kernel=True)
 
     async def is_alive(self) -> bool:
         """
@@ -189,7 +210,42 @@ class LocalTransport(KernelTransport):
         *,
         timeout: float | None = None,
         output_callback=None,
+        silent: bool = False,
         store_history: bool = True,
+        user_expressions: dict | None = None,
+        metadata: dict | None = None,
+        subshell_id: str | None = None,
+        allow_stdin: bool = False,
+        stop_on_error: bool = True,
+    ) -> ExecutionResult:
+        """Execute while ensuring one upstream helper owns the client channels."""
+        if subshell_id is not None:
+            await self._require_feature("kernel subshells")
+        async with self._request_lock:
+            return await self._execute_locked(
+                code,
+                timeout=timeout,
+                output_callback=output_callback,
+                silent=silent,
+                store_history=store_history,
+                user_expressions=user_expressions,
+                metadata=metadata,
+                subshell_id=subshell_id,
+                allow_stdin=allow_stdin,
+                stop_on_error=stop_on_error,
+            )
+
+    async def _execute_locked(
+        self,
+        code: str,
+        *,
+        timeout: float | None = None,
+        output_callback=None,
+        silent: bool = False,
+        store_history: bool = True,
+        user_expressions: dict | None = None,
+        metadata: dict | None = None,
+        subshell_id: str | None = None,
         allow_stdin: bool = False,
         stop_on_error: bool = True,
     ) -> ExecutionResult:
@@ -237,148 +293,97 @@ class LocalTransport(KernelTransport):
             raise RuntimeError("LocalTransport not started. Call start() first.")
 
         kc = self._km.client
-        res = ExecutionResult(status="ok")
+        state = ExecutionState(max_output_bytes=self._max_output_bytes)
 
         # Trigger pre-execution hooks for instrumentation/logging
         kernel_hooks.trigger_before_execute_hooks(code)
 
-        # Accumulators for output_callback
-        outputs: list[dict[str, Any]] = []
-        exec_count: int | None = None
-
-        # Queue of pending callback snapshots.  The synchronous output_hook
-        # (called from execute_interactive's ZMQ loop) cannot await coroutines,
-        # so we enqueue snapshots and drain them *in order* after execute_interactive
-        # returns.  This satisfies the KernelTransport contract that callbacks are
-        # awaited strictly in arrival order.
-        pending_callbacks: list[tuple[list[dict[str, Any]], int | None]] = []
-
-        def _enqueue_callback() -> None:
-            """Snapshot current outputs and enqueue for later awaiting."""
-            if output_callback:
-                pending_callbacks.append((outputs[:], exec_count))
-
-        async def _flush_callbacks() -> None:
-            """Drain queued snapshots in arrival order and emit final snapshot."""
-            if not output_callback:
-                pending_callbacks.clear()
-                return
-            for snapshot_outputs, snapshot_count in pending_callbacks:
-                await output_callback(snapshot_outputs, snapshot_count)
-            pending_callbacks.clear()
-            await output_callback(outputs[:], exec_count)
+        callbacks = OutputCallbackDispatcher(
+            output_callback,
+            state.snapshot,
+            timeout=self._output_callback_timeout,
+        )
+        completed_request = False
 
         # Custom output hook to capture outputs for our result object
         def output_hook(msg: dict[str, Any]) -> None:
             """Capture IOPub messages and fold them into our ExecutionResult."""
-            nonlocal exec_count
             kernel_hooks.trigger_output_hooks(msg)
-
-            header = msg.get("header") or {}
-            msg_type = header.get("msg_type")
-            content = msg.get("content") or {}
-
-            if msg_type == "execute_input":
-                ec = content.get("execution_count")
-                if ec is not None:
-                    res.execution_count = ec
-                    exec_count = ec
-                _enqueue_callback()
-
-            elif msg_type == "stream":
-                name = content.get("name")
-                text = content.get("text", "") or ""
-                output_dict = {"output_type": "stream", "name": name, "text": text}
-                res.outputs.append(output_dict)
-                outputs.append(output_dict)
-                if name == "stdout":
-                    res.stdout += text
-                elif name == "stderr":
-                    res.stderr += text
-                _enqueue_callback()
-
-            elif msg_type in ("display_data", "update_display_data", "execute_result"):
-                data = content.get("data") or {}
-                md = content.get("metadata") or {}
-                if content.get("execution_count") is not None:
-                    res.execution_count = content["execution_count"]
-                    exec_count = res.execution_count
-                out: dict[str, Any] = {
-                    "output_type": (
-                        "execute_result" if msg_type == "execute_result" else "display_data"
-                    ),
-                    "data": data,
-                    "metadata": md,
-                }
-                if out["output_type"] == "execute_result":
-                    out["execution_count"] = res.execution_count
-                res.outputs.append(out)
-                outputs.append(out)
-                _enqueue_callback()
-
-            elif msg_type == "clear_output":
-                res.outputs.clear()
-                res.stdout = ""
-                res.stderr = ""
-                outputs.clear()
-                _enqueue_callback()
-
-            elif msg_type == "error":
-                res.status = "error"
-                err = {
-                    "output_type": "error",
-                    "ename": content.get("ename"),
-                    "evalue": content.get("evalue"),
-                    "traceback": content.get("traceback"),
-                }
-                res.outputs.append(err)
-                outputs.append(err)
-                _enqueue_callback()
+            if state.apply(msg):
+                callbacks.publish()
 
         try:
-            # Use execute_interactive for proper async handling
-            reply = await kc.execute_interactive(
-                code,
-                silent=False,
-                store_history=store_history,
-                allow_stdin=allow_stdin,
-                stop_on_error=stop_on_error,
-                timeout=timeout,
-                output_hook=output_hook,
-            )
+            original_execute = kc.execute
+            if metadata or subshell_id is not None:
 
-            # Update final status from reply (unless already set to error by IOPub)
-            if res.status != "error":
-                res.status = reply.get("content", {}).get("status", "ok")
+                def _execute_with_metadata(
+                    source,
+                    silent=False,
+                    store_history=True,
+                    user_expressions=None,
+                    allow_stdin=None,
+                    stop_on_error=True,
+                ):
+                    content = {
+                        "code": source,
+                        "silent": silent,
+                        "store_history": store_history,
+                        "user_expressions": user_expressions or {},
+                        "allow_stdin": bool(allow_stdin),
+                        "stop_on_error": stop_on_error,
+                    }
+                    message = kc.session.msg("execute_request", content=content, metadata=metadata)
+                    if subshell_id is not None:
+                        message["header"]["subshell_id"] = subshell_id
+                    kc.shell_channel.send(message)
+                    return message["header"]["msg_id"]
 
-            # Extract final execution count from reply
-            if "execution_count" in reply.get("content", {}):
-                res.execution_count = reply["content"]["execution_count"]
-                exec_count = res.execution_count
+                kc.execute = _execute_with_metadata
+            try:
+                reply = await kc.execute_interactive(
+                    code,
+                    silent=silent,
+                    store_history=store_history,
+                    user_expressions=user_expressions,
+                    allow_stdin=allow_stdin,
+                    stop_on_error=stop_on_error,
+                    timeout=timeout,
+                    output_hook=output_hook,
+                )
+            finally:
+                if metadata or subshell_id is not None:
+                    kc.execute = original_execute
+            state.apply({"msg_type": "execute_reply", "content": reply.get("content", {})})
+            res = state.result()
+            res.request_id = (reply.get("parent_header") or {}).get("msg_id")
+            completed_request = True
 
-            # Trigger post-execution hooks for instrumentation/cleanup
-            kernel_hooks.trigger_after_execute_hooks(res)
+        except asyncio.CancelledError:
+            await callbacks.cancel()
+            raise
 
         except TimeoutError as te:
-            # Handle execution timeout gracefully
+            res = state.result()
             res.status = "error"
+            res.outcome = "unknown"
+            res.timed_out = True
             res.stderr += f"\nExecution timed out after {timeout}s."
             kernel_hooks.trigger_on_error_hooks(te)
 
         except Exception as e:
-            # Handle any other execution errors
+            res = state.result()
             res.status = "error"
+            res.outcome = "unknown"
             res.stderr += f"\n{type(e).__name__}: {e}"
             kernel_hooks.trigger_on_error_hooks(e)
+        finally:
+            callback_error = await callbacks.finish()
 
-        # Always flush callbacks (including timeout/error paths) so consumers
-        # receive ordered snapshots and a final authoritative state.
-        try:
-            await _flush_callbacks()
-        except Exception as cb_exc:
-            res.status = "error"
-            res.stderr += f"\n{type(cb_exc).__name__}: {cb_exc}"
-            kernel_hooks.trigger_on_error_hooks(cb_exc)
+        if callback_error is not None:
+            kernel_hooks.trigger_on_error_hooks(callback_error)
+        callbacks.apply_to(res)
+        if completed_request:
+            kernel_hooks.trigger_after_execute_hooks(res)
 
         return res
 
@@ -394,7 +399,9 @@ class LocalTransport(KernelTransport):
         Raises:
             RuntimeError: If no kernel is currently managed.
         """
-        await self._km.restart()
+        async with self._request_lock:
+            await self._km.restart()
+            self._supported_features = None
 
     async def interrupt(self) -> None:
         """Interrupt the running kernel via the KernelManager."""
@@ -402,10 +409,7 @@ class LocalTransport(KernelTransport):
 
     async def complete(self, code: str, cursor_pos: int) -> CompleteResult:
         """Request tab-completion from the kernel."""
-        if not self._km or not self._km.client:
-            raise RuntimeError("LocalTransport not started. Call start() first.")
-        kc = self._km.client
-        reply = await kc.complete(code, cursor_pos, reply=True, timeout=10)
+        reply = await self._client_reply("complete", code, cursor_pos)
         content = reply.get("content", {})
         return CompleteResult(
             matches=content.get("matches", []),
@@ -422,12 +426,7 @@ class LocalTransport(KernelTransport):
         detail_level: int = 0,
     ) -> InspectResult:
         """Inspect an object at the cursor position."""
-        if not self._km or not self._km.client:
-            raise RuntimeError("LocalTransport not started. Call start() first.")
-        kc = self._km.client
-        reply = await kc.inspect(
-            code, cursor_pos, detail_level=detail_level, reply=True, timeout=10
-        )
+        reply = await self._client_reply("inspect", code, cursor_pos, detail_level=detail_level)
         content = reply.get("content", {})
         return InspectResult(
             found=content.get("found", False),
@@ -438,10 +437,7 @@ class LocalTransport(KernelTransport):
 
     async def is_complete(self, code: str) -> IsCompleteResult:
         """Check whether *code* is syntactically complete."""
-        if not self._km or not self._km.client:
-            raise RuntimeError("LocalTransport not started. Call start() first.")
-        kc = self._km.client
-        reply = await kc.is_complete(code, reply=True, timeout=10)
+        reply = await self._client_reply("is_complete", code)
         content = reply.get("content", {})
         return IsCompleteResult(
             status=content.get("status", "unknown"),
@@ -455,44 +451,121 @@ class LocalTransport(KernelTransport):
         raw: bool = True,
         hist_access_type: str = "tail",
         n: int = 10,
+        session: int = 0,
+        start: int = 0,
+        stop: int = 0,
+        pattern: str = "",
+        unique: bool = False,
     ) -> HistoryResult:
         """Retrieve execution history from the kernel."""
-        if not self._km or not self._km.client:
-            raise RuntimeError("LocalTransport not started. Call start() first.")
-        kc = self._km.client
-        reply = await kc.history(
+        reply = await self._client_reply(
+            "history",
             raw=raw,
             output=output,
             hist_access_type=hist_access_type,
             n=n,
-            reply=True,
-            timeout=10,
+            session=session,
+            start=start,
+            stop=stop,
+            pattern=pattern,
+            unique=unique,
         )
         content = reply.get("content", {})
-        entries = [
-            HistoryEntry(
-                session=entry[0],
-                line_number=entry[1],
-                input=entry[2] if len(entry) > 2 else "",
-                output=entry[3] if len(entry) > 3 else None,
-            )
-            for entry in content.get("history", [])
-        ]
+        entries = decode_history_entries(content.get("history", []))
         return HistoryResult(history=entries, status=content.get("status", "ok"))
 
     async def kernel_info(self) -> KernelInfoResult:
         """Retrieve metadata about the connected kernel."""
-        if not self._km or not self._km.client:
-            raise RuntimeError("LocalTransport not started. Call start() first.")
-        kc = self._km.client
-        reply = await kc.kernel_info(reply=True, timeout=10)
+        reply = await self._client_reply("kernel_info")
         content = reply.get("content", {})
         lang = content.get("language_info", {})
-        return KernelInfoResult(
+        result = KernelInfoResult(
             protocol_version=content.get("protocol_version", ""),
             implementation=content.get("implementation", ""),
             implementation_version=content.get("implementation_version", ""),
             language_info=lang,
             banner=content.get("banner", ""),
             status=content.get("status", "ok"),
+            help_links=content.get("help_links", []),
+            supported_features=content.get("supported_features", []),
+            raw_content=dict(content),
         )
+        self._supported_features = set(result.supported_features)
+        return result
+
+    async def debug(self, request: dict) -> dict:
+        """Send a DAP request over the control channel."""
+        if not isinstance(request, dict):
+            raise TypeError("debug request must be a dictionary")
+        await self._require_feature("debugger")
+        reply = await self._control_reply("debug_request", request)
+        return dict(reply.get("content") or {})
+
+    async def create_subshell(self) -> str:
+        """Create an advertised kernel subshell."""
+        await self._require_feature("kernel subshells")
+        content = (await self._control_reply("create_subshell_request")).get("content") or {}
+        self._raise_control_error(content, "create subshell")
+        subshell_id = content.get("subshell_id")
+        if not isinstance(subshell_id, str) or not subshell_id:
+            raise RuntimeError("Kernel returned no subshell id")
+        return subshell_id
+
+    async def delete_subshell(self, subshell_id: str) -> None:
+        """Delete an advertised kernel subshell."""
+        await self._require_feature("kernel subshells")
+        content = (
+            await self._control_reply(
+                "delete_subshell_request",
+                {"subshell_id": subshell_id},
+            )
+        ).get("content") or {}
+        self._raise_control_error(content, "delete subshell")
+
+    async def list_subshells(self) -> list[str]:
+        """List advertised kernel subshells."""
+        await self._require_feature("kernel subshells")
+        content = (await self._control_reply("list_subshell_request")).get("content") or {}
+        self._raise_control_error(content, "list subshells")
+        ids = content.get("subshell_id", [])
+        if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
+            raise RuntimeError("Kernel returned invalid subshell ids")
+        return ids
+
+    async def _require_feature(self, feature: str) -> None:
+        if self._supported_features is None:
+            await self.kernel_info()
+        if feature not in (self._supported_features or set()):
+            raise UnsupportedKernelCapabilityError(
+                f"Kernel does not advertise the {feature!r} capability"
+            )
+
+    async def _control_reply(
+        self,
+        msg_type: str,
+        content: dict | None = None,
+    ) -> dict[str, Any]:
+        async with self._control_lock:
+            if not self._km or not self._km.client:
+                raise RuntimeError("LocalTransport not started. Call start() first.")
+            client = self._km.client
+            message = client.session.msg(msg_type, content=content or {})
+            client.control_channel.send(message)
+            return await client._recv_reply(
+                message["header"]["msg_id"],
+                timeout=10,
+                channel="control",
+            )
+
+    @staticmethod
+    def _raise_control_error(content: dict, operation: str) -> None:
+        if content.get("status", "ok") != "ok":
+            raise RuntimeError(f"Could not {operation}: {content.get('evalue', 'kernel error')}")
+
+    async def _client_reply(self, method: str, *args, **kwargs) -> dict[str, Any]:
+        """Call one reply-consuming jupyter_client helper under the request guard."""
+        async with self._request_lock:
+            if not self._km or not self._km.client:
+                raise RuntimeError("LocalTransport not started. Call start() first.")
+            operation = getattr(self._km.client, method)
+            return await operation(*args, **kwargs, reply=True, timeout=10)

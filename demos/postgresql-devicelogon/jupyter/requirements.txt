@@ -1,5 +1,5 @@
 # Kernel-side dependencies for the Jupyter image.
-jupyter-collaboration>=4.1.1
+jupyter-collaboration>=5.0.0
 
 ipywidgets
 pandas

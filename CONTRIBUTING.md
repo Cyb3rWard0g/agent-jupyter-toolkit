@@ -18,10 +18,13 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Clone and install (editable, both packages + dev deps)
 git clone https://github.com/Cyb3rWard0g/agent-jupyter-toolkit.git
 cd agent-jupyter-toolkit
-uv sync --all-packages
+uv sync --locked --all-packages --all-extras
 ```
 
-This creates a `.venv` with both packages installed in editable mode.
+This creates a `.venv` with both packages installed in editable mode, including
+the local kernel, DataFrame, batch execution, and server integration dependencies.
+Use the checked-in lockfile for normal development; run `uv lock` intentionally
+when changing dependencies and include the resulting `uv.lock` in the commit.
 
 ## Quality Checks
 
@@ -52,11 +55,11 @@ uv run ruff format packages/
 
 ```sh
 # Run all tests across both packages
-uv run --all-packages pytest
+uv run --locked --all-packages --all-extras pytest
 
 # Run tests for a specific package
-cd packages/agent-jupyter-toolkit && uv run pytest --tb=short -q
-cd packages/mcp-jupyter-notebook  && uv run pytest --tb=short -q
+uv run --locked --all-packages --all-extras pytest packages/agent-jupyter-toolkit/tests -q
+uv run --locked --all-packages --all-extras pytest packages/mcp-jupyter-notebook/tests -q
 ```
 
 ### Full Pre-Push Check
@@ -64,11 +67,26 @@ cd packages/mcp-jupyter-notebook  && uv run pytest --tb=short -q
 Run everything in one go before pushing:
 
 ```sh
-uv run ruff check packages/ --fix && \
-uv run ruff format packages/ && \
-cd packages/agent-jupyter-toolkit && uv run pytest --tb=short -q && cd ../.. && \
-cd packages/mcp-jupyter-notebook  && uv run pytest --tb=short -q && cd ../..
+uv run ruff check packages/ && \
+uv run ruff format --check packages/ && \
+uv run --locked --all-packages --all-extras pytest --tb=short -q
 ```
+
+`uv run tox` also runs both package suites in separate environments, plus lint
+and format checks. Server tests skip unless `JAT_SERVER_URL` and
+`JAT_SERVER_TOKEN` point to a test Jupyter Server. Collaboration tests use
+`JAT_COLLAB_URL` and `JAT_COLLAB_TOKEN` and require its collaboration extension.
+Use an isolated server root because these tests create notebooks and kernels.
+
+The MCP tox environment installs the toolkit as a local package dependency.
+After changing toolkit code, use `uv run tox -r -e mcp` to rebuild that environment
+so it tests the current toolkit instead of a previously installed build.
+
+After the checks pass, review `git diff` and `git diff --check`, stage the files
+for one coherent change, and inspect `git diff --cached` before committing.
+Use a concise commit subject describing the behavior changed; explain the reason
+and validation in the body for substantial changes. Local commits do not publish
+packages or create releases.
 
 ---
 
@@ -98,7 +116,7 @@ Two GitHub Actions workflows live in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | Push / PR to `main` | Lint/format (ruff) + tests (Python 3.11–3.13) |
+| `ci.yml` | Push / PR to `main` | Lint/format, Python 3.11–3.13 tests, real server/collaboration, dependency resolution, extras, and local platform checks |
 | `release.yml` | Push a `v*` tag | Build → test → publish to PyPI → GitHub Release → Docker image |
 
 **Pushing to `main` never triggers a release.** Only pushing a version tag does.
@@ -119,10 +137,9 @@ There is no hard-coded version anywhere — one tag drives both packages.
 #### 1. Run quality checks locally
 
 ```sh
-uv run ruff check packages/ --fix
-uv run ruff format packages/
-cd packages/agent-jupyter-toolkit && uv run pytest --tb=short -q && cd ../..
-cd packages/mcp-jupyter-notebook  && uv run pytest --tb=short -q && cd ../..
+uv run ruff check packages/
+uv run ruff format --check packages/
+uv run --locked --all-packages --all-extras pytest --tb=short -q
 ```
 
 #### 2. Determine the next version
@@ -137,6 +154,13 @@ git tag -l 'v*' | sort -V | tail -1
 #   major:  vX.Y.Z → v(X+1).0.0
 ```
 
+When the MCP server uses new toolkit APIs, set its toolkit dependency minimum
+in `packages/mcp-jupyter-notebook/pyproject.toml` to the release that first
+provides those APIs, including the `dataframe` extra. Do this when selecting
+the release version, then refresh the lockfile and rerun checks. Workspace
+installs use the local toolkit and do not test compatibility with older PyPI
+releases.
+
 #### 3. Tag and push
 
 ```sh
@@ -147,10 +171,11 @@ git push origin vX.Y.Z
 This triggers the `release.yml` workflow which:
 1. Builds both packages (`python -m build`)
 2. Runs the full test matrix (Python 3.11–3.13)
-3. Publishes `agent-jupyter-toolkit` to PyPI (via OIDC trusted publishing)
-4. Publishes `mcp-jupyter-notebook` to PyPI (via OIDC trusted publishing)
-5. Creates a GitHub Release with auto-generated notes and attached artifacts
-6. Builds and pushes a Docker image to GHCR (`ghcr.io/cyb3rward0g/mcp-jupyter-notebook`)
+3. Installs the built wheel pair and verifies their versions and workspace APIs
+4. Publishes `agent-jupyter-toolkit` to PyPI (via OIDC trusted publishing)
+5. Waits until that toolkit version is installable, then publishes `mcp-jupyter-notebook`
+6. Creates a GitHub Release with auto-generated notes and attached artifacts
+7. Builds and pushes a Docker image to GHCR (`ghcr.io/cyb3rward0g/mcp-jupyter-notebook`)
 
 ### Manual Release (fallback)
 

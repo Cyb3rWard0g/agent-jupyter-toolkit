@@ -7,8 +7,6 @@ tool pack can grow without concentrating every handler in one file.
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
-
 from agent_jupyter_toolkit.kernel.variables import VariableManager
 from agent_jupyter_toolkit.utils import (
     check_package_availability,
@@ -22,6 +20,7 @@ from agent_jupyter_toolkit.utils import (
     invoke_markdown_cell,
     invoke_notebook_cells,
 )
+from mcp_jupyter_notebook._mcp import FastMCP
 
 from .document import register_document_tools
 from .execution import register_execution_tools

@@ -17,6 +17,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 - **Real-time sync** — Yjs collaboration transport shows cell edits instantly in JupyterLab
 - **Two session modes** — connect to a remote Jupyter server or run a local kernel
 - **Three transports** — stdio (for editors), SSE, or streamable HTTP
+- **MCP SDK compatibility** — supports the 1.26 API and the 2.x `MCPServer` API
+- **Observable collaboration policy** — required, preferred with classified fallback, or disabled
 - **Zero config defaults** — sensible defaults with full override via CLI args or env vars
 
 ## Quick Start
@@ -79,7 +81,19 @@ Ask your agent:
 
 ## Tools
 
-> Every existing tool accepts an optional `notebook_path` parameter for multi-notebook workflows. When omitted, the default notebook is used.
+> Session operations accept an optional `notebook_path`. When omitted, the
+> manager's default notebook is used. Open and close tools require a path.
+
+`notebook_open(path)` keeps an existing default; use
+`notebook_open(path, set_default=True)` to switch subsequent pathless calls.
+Explicit paths on execution tools affect only that call. Other sessions remain
+open when switching. `notebook_list` shows the current default and open notebooks.
+No session ID is required.
+
+Session management is provided by the core toolkit's `NotebookWorkspace`,
+running inside the MCP server process. Local and remote MCP connections use the
+same behavior. Callers sharing a manager share its default; independent callers
+should use explicit notebook paths when working through that shared manager.
 
 ### Notebook Lifecycle
 
@@ -97,7 +111,7 @@ Ask your agent:
 |---|---|
 | `notebook_code_run` | Append a new code cell, execute it, and return outputs (stdout, stderr, rich displays) |
 | `notebook_code_run_existing` | Replace the source of an existing cell (by index) and re-execute it |
-| `notebook_code_execute` | Execute code in the kernel *without* creating a notebook cell (background work) |
+| `notebook_code_execute` | Execute code without creating a cell, optionally in a kernel subshell |
 | `notebook_cells_run` | Execute multiple cells sequentially (code and/or markdown) |
 | `notebook_run_all` | Execute every code cell in notebook order and return a per-cell summary |
 | `notebook_restart_and_run_all` | Restart the kernel, then execute every code cell from a clean state |
@@ -129,8 +143,10 @@ Ask your agent:
 
 | Tool | Description |
 |---|---|
-| `notebook_packages_install` | Install Python packages in the kernel (pip-style specifiers) |
+| `notebook_packages_install` | Install PEP 508 requirements in the kernel |
+| `notebook_packages_uninstall` | Uninstall parsed distribution requirements from the kernel |
 | `notebook_packages_check` | Check which packages are available without installing |
+| `notebook_dependencies_list` | List canonical tracked requirements and resolved versions |
 
 ### Kernel Control
 
@@ -141,6 +157,10 @@ Ask your agent:
 | `notebook_session_info` | Get session info (kernel type, alive status, connections) |
 | `notebook_kernel_history` | Retrieve recent execution history from the kernel |
 | `notebook_kernel_restart` | Restart the kernel (destructive — clears all state) |
+| `notebook_subshell_create` | Create a subshell when the kernel advertises support |
+| `notebook_subshell_list` | List active subshell IDs |
+| `notebook_subshell_delete` | Delete a subshell by ID |
+| `notebook_debug_request` | Send a Debug Adapter Protocol request to a capable kernel |
 
 ### Introspection
 
@@ -153,7 +173,7 @@ Ask your agent:
 | `notebook_variable_get` | Get the value of a specific variable |
 | `notebook_variable_set` | Set a variable in the kernel's global scope |
 
-> Full tool reference with parameters and examples: [docs/tools.md](docs/tools.md)
+> Full tool reference with parameters and examples: [Tool reference](../../docs/mcp-server/tools.md)
 
 ---
 
@@ -191,8 +211,14 @@ All settings can be passed as **CLI arguments** or **environment variables**. CL
 | `MCP_JUPYTER_LOG_LEVEL` | — | `DEBUG`, `INFO`, `WARNING`, `ERROR` | `INFO` |
 | `MCP_JUPYTER_HEADERS_JSON` | — | Extra HTTP headers as JSON object | — |
 | `MCP_JUPYTER_PREFER_COLLAB` | — | Use Yjs real-time sync (`true`/`false`) | `true` |
+| `MCP_JUPYTER_COLLABORATION_MODE` | `--collaboration-mode` | `required`, `preferred`, or `disabled` | `preferred` |
 
 > Full configuration reference: [docs/mcp-server/configuration.md](../../docs/mcp-server/configuration.md)
+
+`MCP_JUPYTER_PREFER_COLLAB` remains a compatibility alias when the explicit
+mode is unset. Session/list results show the selected document transport and a
+fallback reason. Kernel execution results include stable cell/request identity,
+persistence status, truncation accounting, and timeout/outcome fields.
 
 ---
 

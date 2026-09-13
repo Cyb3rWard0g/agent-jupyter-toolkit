@@ -17,7 +17,8 @@ mcp-jupyter-notebook \
   --mode server \
   --base-url http://localhost:8888 \
   --token my-token \
-  --notebook-path analysis.ipynb
+  --notebook-path analysis.ipynb \
+  --collaboration-mode preferred
 ```
 
 **Requirements:**
@@ -56,6 +57,7 @@ All configuration can be set via environment variables. This is the recommended 
 | `MCP_JUPYTER_LOG_LEVEL` | Python log level | `INFO` |
 | `MCP_JUPYTER_HEADERS_JSON` | Extra HTTP headers as a JSON object (e.g. cookies, XSRF tokens) | — |
 | `MCP_JUPYTER_PREFER_COLLAB` | Enable Yjs collaboration transport for real-time notebook sync | `true` |
+| `MCP_JUPYTER_COLLABORATION_MODE` | Collaboration policy: `required`, `preferred`, or `disabled` | `preferred` |
 | `MCP_JUPYTER_ENABLE_TOOLS` | Optional tool sets to enable (comma-separated). Example: `postgresql` | — |
 
 ---
@@ -71,6 +73,7 @@ mcp-jupyter-notebook [OPTIONS]
   --kernel-name NAME      Kernel spec name (default: python3)
   --notebook-path PATH    Notebook file path (.ipynb)
   --transport TRANSPORT   stdio | sse | streamable-http
+  --collaboration-mode    required | preferred | disabled
   --host HOST             Host for HTTP transports (default: 127.0.0.1)
   --port PORT             Port for HTTP transports (default: 8000)
   --enable-tools TOOLS    Enable optional tool sets (repeatable or comma-separated)
@@ -130,15 +133,21 @@ mcp-jupyter-notebook --transport streamable-http --host 0.0.0.0 --port 8000
 
 ## Collaboration Transport
 
-When `MCP_JUPYTER_PREFER_COLLAB` is `true` (the default), the server uses the Yjs WebSocket protocol provided by [`jupyter-collaboration`](https://github.com/jupyterlab/jupyter-collaboration) to sync notebook changes. This means:
+When collaboration is required or preferred, the server uses the Yjs WebSocket protocol provided by [`jupyter-collaboration`](https://github.com/jupyterlab/jupyter-collaboration) to sync notebook changes. This means:
 
 - Cell edits appear **instantly** in JupyterLab in your browser
 - Multiple agents or users can edit the same notebook simultaneously
 - The notebook document is kept in sync via Conflict-free Replicated Data Types (CRDTs)
 
-**Requirements:** The Jupyter server must have `jupyter-collaboration>=4.1.1` installed. The Docker setup in `quickstarts/` includes this by default.
+**Requirements:** The Jupyter server must have `jupyter-collaboration>=5.0.0` installed for collaboration mode. The Docker setup in `quickstarts/` includes this by default.
 
-If `jupyter-collaboration` is not available, set `MCP_JUPYTER_PREFER_COLLAB=false` to fall back to the standard Contents API (REST-based save/load).
+- `required` uses collaboration and preserves any startup failure.
+- `preferred` falls back to the Contents API only when the collaboration endpoint reports an unsupported response. Permission, authentication, and transient failures remain errors.
+- `disabled` uses the Contents API directly.
+
+`MCP_JUPYTER_PREFER_COLLAB=true/false` remains a compatibility alias for
+preferred/disabled when `MCP_JUPYTER_COLLABORATION_MODE` is unset. The explicit
+mode takes precedence.
 
 ---
 

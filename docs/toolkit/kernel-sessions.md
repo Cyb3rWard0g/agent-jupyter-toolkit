@@ -42,7 +42,7 @@ management:
 ```python
 async with create_session(config) as session:
     result = await session.execute("print('hello')")
-# kernel is shut down here
+# a kernel created by this session is shut down here; a borrowed kernel is preserved
 ```
 
 Or manage manually:
@@ -73,12 +73,9 @@ print(result.outputs)          # list of nbformat output dicts
 ### With timeout
 
 ```python
-import asyncio
-
-try:
-    result = await session.execute("import time; time.sleep(300)", timeout=5.0)
-except asyncio.TimeoutError:
-    print("Execution timed out")
+result = await session.execute("import time; time.sleep(300)", timeout=5.0)
+if result.timed_out:
+    print(result.outcome)  # "unknown": completion was not observed
 ```
 
 ### Real-time output streaming
@@ -97,8 +94,20 @@ result = await session.execute(
 )
 ```
 
-The callback is awaited in strict message order. `outputs` is a cumulative
-list of nbformat-like dicts representing the current cell state.
+Callbacks arrive during execution in message order. `outputs` is a cumulative
+nbformat-like snapshot of the current cell state. Both transports collect
+kernel messages independently from callback delivery and retain the newest
+pending snapshot, so a slow callback cannot stall IOPub intake. Intermediate
+snapshots may be coalesced and `callback_snapshots_coalesced` reports how many.
+
+Each callback call has a 30-second default limit, configurable through
+`SessionConfig.output_callback_timeout` or
+`ServerConfig.output_callback_timeout`; use `None` to disable it. Callback
+failure, cancellation, and timeout leave the kernel `status` unchanged and are
+reported through `callback_status` and `callback_error`. Cancelling the owning
+execution task still cancels callback delivery. A final snapshot is attempted
+for completed and timed-out executions, and disconnect errors retain partial
+results.
 
 ### Execution options
 
@@ -107,11 +116,24 @@ result = await session.execute(
     code,
     timeout=30.0,           # max seconds (None = no limit)
     output_callback=cb,     # real-time streaming
+    silent=False,           # suppress ordinary output when supported
     store_history=True,     # record in kernel history
+    user_expressions={"total": "sum(values)"},
+    metadata={"cellId": "stable-cell-id"},
+    subshell_id=None,        # optional ID from create_subshell()
     allow_stdin=False,      # enable kernel stdin requests
     stop_on_error=True,     # abort queue on error
 )
 ```
+
+Results also report `request_id`, `cell_id`, `source_hash`,
+`kernel_generation`, `persistence_status`, `output_truncated`,
+`dropped_output_bytes`, `callback_status`, `callback_error`,
+`callback_snapshots_coalesced`, `outcome`, and `timed_out`. The default output
+budget is 50 MiB for retained output and display-update sidecars. Stream chunks
+are accumulated without repeatedly copying all preceding text. A timeout or
+disconnect does not prove the kernel skipped the code,
+so check kernel state before retrying work with side effects.
 
 ## Kernel Introspection
 
@@ -163,6 +185,8 @@ print(info.implementation)         # "ipython"
 print(info.implementation_version) # "8.x.x"
 print(info.language_info)          # {"name": "python", "version": "3.11.x", ...}
 print(info.banner)                 # IPython startup banner
+print(info.supported_features)     # explicit capabilities advertised by the kernel
+print(info.help_links)
 ```
 
 ## Kernel Control
@@ -188,6 +212,37 @@ print(result.status)  # "error" (KeyboardInterrupt)
 > **Note:** Interrupt requires a managed kernel (local mode). For remote
 > sessions, it sends `POST /api/kernels/{id}/interrupt` to the server.
 
+### Subshells and debugging
+
+Kernels advertise optional workflows through `kernel_info().supported_features`.
+The toolkit checks those capabilities before sending control-channel requests
+and raises `UnsupportedKernelCapabilityError` when a feature is unavailable.
+
+```python
+info = await session.kernel_info()
+
+if "kernel subshells" in info.supported_features:
+    subshell_id = await session.create_subshell()
+    try:
+        result = await session.execute("worker_state = 1", subshell_id=subshell_id)
+        print(await session.list_subshells())
+    finally:
+        await session.delete_subshell(subshell_id)
+
+if "debugger" in info.supported_features:
+    response = await session.debug({
+        "seq": 1,
+        "type": "request",
+        "command": "debugInfo",
+    })
+```
+
+Subshells require a kernel implementing the Jupyter subshell protocol. Debug
+payloads and responses use the Debug Adapter Protocol shape expected by the
+kernel. Shell and control replies are routed by parent request ID, allowing a
+debug control request to proceed while an execution is paused. Query
+`kernel_info()` before starting that execution so the capability is cached.
+
 ### Execution history
 
 Retrieve previous inputs/outputs from the kernel's history database:
@@ -206,6 +261,22 @@ Parameters:
 - `n`: number of entries for `"tail"` / max results for `"search"`
 - `output`: include output text alongside input
 - `raw`: return raw (un-transformed) input
+- `session`, `start`, `stop`: history session and bounds for range requests
+- `pattern`, `unique`: match expression and deduplication for search requests
+
+### Ownership and session identity
+
+```python
+identity = session.session_info()
+print(identity.kernel_id, identity.server_session_id)
+print(identity.owns_kernel, identity.owns_session)
+print(identity.kernel_generation, identity.encryption_enabled)
+```
+
+`shutdown()` terminates resources created by this client and detaches from
+borrowed kernels. Use `shutdown_kernel()` for an explicit destructive shutdown
+of an attached kernel. Remote notebook sessions reuse the unique Sessions API
+kernel for `ServerConfig.notebook_path`; ambiguous duplicates raise an error.
 
 ## Variable Management
 
@@ -234,7 +305,10 @@ for v in detailed:
 ```
 
 Variable names are validated as legal Python identifiers. Values are
-transferred using base64-encoded JSON to prevent string injection.
+transferred using base64-encoded JSON to prevent string injection. `set()`
+accepts finite, JSON-compatible values only, and `get()` raises if a kernel
+value cannot be represented as strict JSON. Construct DataFrames, arrays, and
+custom Python objects with normal kernel code or the MIME serialization APIs.
 
 ## Execution Hooks
 

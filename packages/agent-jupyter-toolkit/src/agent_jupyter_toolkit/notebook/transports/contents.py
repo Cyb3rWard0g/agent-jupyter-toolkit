@@ -10,6 +10,7 @@ Jupyter Notebook instances.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Callable
@@ -17,9 +18,11 @@ from typing import Any
 from urllib.parse import quote
 
 import aiohttp
+import nbformat
 
 from ..transport import NotebookDocumentTransport
-from ..utils import create_notebook_via_contents_api
+from ..types import CellDeletedError, CellSourceChangedError
+from ..utils import create_notebook_via_contents_api, validate_notebook
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +132,11 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
         self._last_modified: str | None = None
         self._has_freshness_baseline = False
 
+    @property
+    def selected_transport(self) -> str:
+        """Return the active document transport name for diagnostics."""
+        return "contents"
+
     async def start(self) -> None:
         """
         Open a reusable HTTP session. Optionally ensure the notebook file exists.
@@ -190,7 +198,7 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
         content = model.get("content") or {}
         if not isinstance(content, dict):
             raise RuntimeError(f"Contents GET returned unexpected content for {self._path}")
-        return content
+        return _normalize_multiline(content)
 
     async def get_cell(self, index: int) -> dict[str, Any]:
         """Return the cell at *index* via the Contents API.
@@ -229,8 +237,18 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
                 last fetch, if no freshness baseline has been established for
                 an existing notebook, or on any HTTP error.
         """
+        await self._save(content, expected_revision=self._last_modified)
+
+    async def save_snapshot(self, content: dict[str, Any], expected_revision: str | None) -> None:
+        """Save content against the revision returned with the caller's snapshot."""
+        await self._save(content, expected_revision=expected_revision)
+
+    async def _save(self, content: dict[str, Any], *, expected_revision: str | None) -> None:
         assert self._session is not None, "Call start() first"
-        await self._check_stale()
+        candidate = nbformat.from_dict(content)
+        validate_notebook(candidate)
+        content = json.loads(nbformat.writes(candidate, version=4))
+        await self._check_stale(expected_revision=expected_revision)
         url = f"{self._base}/api/contents/{quote(self._path)}"
         body = {"type": "notebook", "format": "json", "content": content}
         model = await self._json_request("PUT", url, json=body)
@@ -279,10 +297,21 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
         tags: list[str] | None = None,
     ) -> int:
         """Append a code cell and return its new index."""
+        index, _ = await self.append_code_cell_with_id(source, metadata=metadata, tags=tags)
+        return index
+
+    async def append_code_cell_with_id(
+        self,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> tuple[int, str]:
+        """Append a code cell and return its index and ID in one mutation."""
+        cell_id = uuid.uuid4().hex
 
         def m(cells):
             cell = {
-                "id": uuid.uuid4().hex,
+                "id": cell_id,
                 "cell_type": "code",
                 "metadata": dict(metadata or {}),
                 "source": source,
@@ -296,7 +325,8 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
             cells.append(cell)
             return len(cells) - 1
 
-        return await self._mutate_cells(m, kind="append_code")
+        index = await self._mutate_cells(m, kind="append_code", event={"cell_id": cell_id})
+        return index, cell_id
 
     async def insert_code_cell(
         self,
@@ -343,11 +373,46 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
             cell = cells[index]
             if not isinstance(outputs, list) or not all(isinstance(o, dict) for o in outputs):
                 raise TypeError("update_cell_outputs: 'outputs' must be a list of dicts")
+            if cell.get("cell_type") != "code":
+                raise TypeError("update_cell_outputs requires a code cell")
             cell["outputs"] = outputs
             cell["execution_count"] = execution_count
             return index
 
         await self._mutate_cells(m, kind="outputs")
+
+    async def update_cell_outputs_by_id(
+        self,
+        cell_id: str,
+        outputs: list[dict[str, Any]],
+        execution_count: int | None,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Find and update a cell in one serialized Contents mutation."""
+        if not isinstance(outputs, list) or not all(isinstance(output, dict) for output in outputs):
+            raise TypeError("update_cell_outputs_by_id: outputs must be a list of dicts")
+
+        def mutate(cells):
+            for index, cell in enumerate(cells):
+                if cell.get("id") != cell_id:
+                    continue
+                if cell.get("cell_type") != "code":
+                    raise TypeError("update_cell_outputs_by_id requires a code cell")
+                if expected_source is not None and cell.get("source") != expected_source:
+                    raise CellSourceChangedError(
+                        f"Cell {cell_id!r} source changed during execution"
+                    )
+                cell["outputs"] = outputs
+                cell["execution_count"] = execution_count
+                return index
+            raise CellDeletedError(f"Cell {cell_id!r} was deleted")
+
+        return await self._mutate_cells(
+            mutate,
+            kind="outputs",
+            event={"cell_id": cell_id},
+        )
 
     async def append_markdown_cell(self, source: str, tags: list[str] | None = None) -> int:
         """Append a markdown cell and return its new index."""
@@ -404,6 +469,31 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
 
         await self._mutate_cells(m, kind="set_source")
 
+    async def set_cell_source_by_id(
+        self,
+        cell_id: str,
+        source: str,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Resolve, verify, and update a cell in one Contents mutation."""
+
+        def mutate(cells):
+            for index, cell in enumerate(cells):
+                if cell.get("id") != cell_id:
+                    continue
+                if expected_source is not None and cell.get("source") != expected_source:
+                    raise CellSourceChangedError(f"Cell {cell_id!r} source changed before update")
+                cell["source"] = source
+                return index
+            raise CellDeletedError(f"Cell {cell_id!r} was deleted")
+
+        return await self._mutate_cells(
+            mutate,
+            kind="set_source",
+            event={"cell_id": cell_id},
+        )
+
     async def delete_cell(self, index: int) -> None:
         """Delete the cell at `index`."""
 
@@ -445,6 +535,73 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
             if cell.get("id") == cell_id:
                 return cell
         raise KeyError(f"No cell with id {cell_id!r}")
+
+    # ---------- notebook-level metadata ----------
+
+    async def get_metadata(self) -> dict[str, Any]:
+        """Return an isolated copy of notebook-level metadata."""
+        async with self._lock:
+            content = await self.fetch()
+            return json.loads(json.dumps(content.get("metadata") or {}))
+
+    async def update_metadata(self, updates: dict[str, Any]) -> None:
+        """Shallow-merge notebook metadata through one guarded GET/PUT cycle."""
+        if not isinstance(updates, dict):
+            raise TypeError("update_metadata: 'updates' must be a dict")
+        try:
+            sanitized = json.loads(json.dumps(updates, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("update_metadata: values must be JSON-compatible") from exc
+
+        async with self._lock:
+            content = await self.fetch()
+            metadata = content.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                raise TypeError("Notebook metadata is not a mapping")
+            metadata.update(sanitized)
+            content["metadata"] = metadata
+            await self.save(content)
+        for cb in self._on_change:
+            cb({"op": "metadata-updated", "keys": list(sanitized)})
+
+    async def update_metadata_map(
+        self,
+        key: str,
+        updates: dict[str, Any],
+        *,
+        removals: list[str] | None = None,
+    ) -> None:
+        """Merge mapping entries through one guarded GET/PUT cycle."""
+        if not isinstance(key, str):
+            raise TypeError("update_metadata_map: 'key' must be a string")
+        if not isinstance(updates, dict):
+            raise TypeError("update_metadata_map: 'updates' must be a dict")
+        try:
+            sanitized = json.loads(json.dumps(updates, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise TypeError("update_metadata_map: values must be JSON-compatible") from exc
+
+        removed = list(removals or [])
+        if not all(isinstance(entry, str) for entry in removed):
+            raise TypeError("update_metadata_map: 'removals' must contain only strings")
+
+        async with self._lock:
+            content = await self.fetch()
+            metadata = content.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                raise TypeError("Notebook metadata is not a mapping")
+            current = metadata.get(key, {})
+            if not isinstance(current, dict):
+                raise TypeError(f"Notebook metadata {key!r} is not a mapping")
+            merged = dict(current)
+            for entry in removed:
+                merged.pop(entry, None)
+            merged.update(sanitized)
+            metadata[key] = merged
+            content["metadata"] = metadata
+            await self.save(content)
+        for cb in self._on_change:
+            cb({"op": "metadata-map-updated", "key": key, "keys": list(sanitized)})
 
     # ---------- cell reordering ----------
 
@@ -491,7 +648,7 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
         """
         return self._last_modified
 
-    async def _check_stale(self) -> None:
+    async def _check_stale(self, *, expected_revision: str | None) -> None:
         """Verify the notebook has not been modified externally.
 
         Performs a lightweight metadata-only GET (``content=0``) against the
@@ -511,10 +668,10 @@ class ContentsApiDocumentTransport(NotebookDocumentTransport):
                 f"Refusing to save notebook {self._path!r} without a freshness baseline. "
                 f"Call fetch() before save() so concurrent edits can be detected."
             )
-        if server_ts and server_ts != self._last_modified:
+        if server_ts and server_ts != expected_revision:
             raise RuntimeError(
                 f"Notebook {self._path!r} was modified externally "
-                f"(expected last_modified={self._last_modified!r}, "
+                f"(expected last_modified={expected_revision!r}, "
                 f"server has {server_ts!r}). "
                 f"Re-fetch the notebook before saving."
             )
@@ -557,3 +714,18 @@ def _validate_tags(tags: list[str]) -> None:
     """Ensure tags is a list of strings (raise TypeError otherwise)."""
     if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
         raise TypeError("tags must be a list of strings")
+
+
+def _normalize_multiline(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    source = value.get("source")
+    if isinstance(source, list):
+        value["source"] = "".join(str(part) for part in source)
+    if value.get("output_type") == "stream" and isinstance(value.get("text"), list):
+        value["text"] = "".join(str(part) for part in value["text"])
+    for cell in value.get("cells", []) if isinstance(value.get("cells"), list) else []:
+        _normalize_multiline(cell)
+    for output in value.get("outputs", []) if isinstance(value.get("outputs"), list) else []:
+        _normalize_multiline(output)
+    return value

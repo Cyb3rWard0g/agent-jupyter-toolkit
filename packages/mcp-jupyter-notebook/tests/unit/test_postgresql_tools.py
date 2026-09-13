@@ -5,8 +5,7 @@ Behavioral tests (actual DB connections/queries) are intentionally out of
 scope for unit tests.
 """
 
-from mcp.server.fastmcp import FastMCP
-
+from mcp_jupyter_notebook._mcp import FastMCP
 from mcp_jupyter_notebook.tools import register_postgresql_tools
 
 

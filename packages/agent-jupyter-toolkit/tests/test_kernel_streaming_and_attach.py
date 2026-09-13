@@ -1,9 +1,22 @@
 import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from agent_jupyter_toolkit.kernel import SessionConfig, create_session
+from agent_jupyter_toolkit.kernel import (
+    KernelInfoResult,
+    SessionConfig,
+    UnsupportedKernelCapabilityError,
+    create_session,
+)
+from agent_jupyter_toolkit.kernel.callbacks import OutputCallbackDispatcher
+from agent_jupyter_toolkit.kernel.execution_state import ExecutionState
 from agent_jupyter_toolkit.kernel.messages import fold_iopub_events
+from agent_jupyter_toolkit.kernel.transports.local import LocalTransport
+from agent_jupyter_toolkit.kernel.transports.server import ServerTransport
+from agent_jupyter_toolkit.kernel.types import ServerConfig
 
 pytestmark = pytest.mark.asyncio
 
@@ -53,6 +66,90 @@ async def test_local_kernel_output_streaming():
         await sess.shutdown()
 
 
+async def test_local_callback_arrives_before_execution_finishes():
+    sess = create_session(SessionConfig(mode="local", kernel_name="python3"))
+    await sess.start()
+    try:
+        streamed = asyncio.Event()
+
+        async def output_callback(outputs, _execution_count):
+            if any("before sleep" in output.get("text", "") for output in outputs):
+                streamed.set()
+
+        task = asyncio.create_task(
+            sess.execute(
+                "import time\nprint('before sleep', flush=True)\ntime.sleep(1)",
+                output_callback=output_callback,
+            )
+        )
+        await asyncio.wait_for(streamed.wait(), timeout=0.75)
+        assert not task.done()
+        assert (await task).status == "ok"
+    finally:
+        await sess.shutdown()
+
+
+async def test_local_concurrent_executions_keep_their_own_messages():
+    sess = create_session(SessionConfig(mode="local", kernel_name="python3"))
+    await sess.start()
+    try:
+        first, second = await asyncio.gather(
+            sess.execute("import time; time.sleep(0.1); print('first-only')"),
+            sess.execute("print('second-only')"),
+        )
+        assert "first-only" in first.stdout
+        assert "second-only" not in first.stdout
+        assert "second-only" in second.stdout
+        assert "first-only" not in second.stdout
+    finally:
+        await sess.shutdown()
+
+
+async def test_fold_honors_deferred_clear_and_display_update():
+    deferred = fold_iopub_events(
+        [
+            {"msg_type": "stream", "content": {"name": "stdout", "text": "preserve\n"}},
+            {"msg_type": "clear_output", "content": {"wait": True}},
+        ]
+    )
+    assert deferred.stdout == "preserve\n"
+
+    updated = fold_iopub_events(
+        [
+            {
+                "msg_type": "display_data",
+                "content": {
+                    "data": {"text/plain": "before"},
+                    "metadata": {},
+                    "transient": {"display_id": "display-1"},
+                },
+            },
+            {
+                "msg_type": "update_display_data",
+                "content": {
+                    "data": {"text/plain": "after"},
+                    "metadata": {},
+                    "transient": {"display_id": "display-1"},
+                },
+            },
+        ]
+    )
+    assert len(updated.outputs) == 1
+    assert updated.outputs[0]["data"]["text/plain"] == "after"
+    assert "transient" not in updated.outputs[0]
+
+
+async def test_execution_state_bounds_and_reports_stream_output():
+    state = ExecutionState(max_output_bytes=5)
+    state.apply({"msg_type": "stream", "content": {"name": "stdout", "text": "12345678"}})
+
+    result = state.result()
+
+    assert result.stdout == "12345"
+    assert result.output_truncated is True
+    assert result.dropped_output_bytes == 3
+
+
 async def test_connection_file_attach():
     sess1 = create_session(SessionConfig(mode="local", kernel_name="python3"))
     await sess1.start()
@@ -69,11 +166,16 @@ async def test_connection_file_attach():
             )
         )
         await sess2.start()
+        await sess2.start()  # Attachment startup is also idempotent.
         try:
+            assert await sess2.is_alive()
             res = await sess2.execute("x = 10\nx")
             assert res.status == "ok"
         finally:
             await sess2.shutdown()
+        still_running = await sess1.execute("x + 1")
+        assert still_running.status == "ok"
+        assert still_running.outputs[0]["data"]["text/plain"] == "11"
     finally:
         await sess1.shutdown()
 
@@ -100,3 +202,269 @@ async def test_local_kernel_timeout_still_emits_callback():
         assert len(exec_counts) == len(snapshots)
     finally:
         await sess.shutdown()
+
+
+async def test_display_update_sidecars_share_output_budget_after_clear():
+    state = ExecutionState(max_output_bytes=180)
+    for index in range(20):
+        state.apply(
+            {
+                "msg_type": "update_display_data",
+                "content": {
+                    "data": {"text/plain": "x" * 40},
+                    "transient": {"display_id": f"display-{index}"},
+                },
+            }
+        )
+        state.apply({"msg_type": "clear_output", "content": {"wait": False}})
+    result = state.result()
+    assert len(json.dumps(result.display_updates).encode()) <= 180
+    assert result.output_truncated
+    assert result.dropped_output_bytes > 0
+
+
+async def test_oversized_display_update_keeps_prior_visible_output():
+    state = ExecutionState(max_output_bytes=200)
+    for kind, value in [("display_data", "before"), ("update_display_data", "x" * 400)]:
+        state.apply(
+            {
+                "msg_type": kind,
+                "content": {"data": {"text/plain": value}, "transient": {"display_id": "d"}},
+            }
+        )
+    result = state.result()
+    assert result.outputs[0]["data"]["text/plain"] == "before"
+    assert result.display_updates == {}
+    assert result.output_truncated
+
+
+async def test_cancelling_execution_cancels_a_blocked_output_callback():
+    callback_started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def callback(*_args):
+        callback_started.set()
+        await blocked.wait()
+
+    async def execute_interactive(*_args, output_hook, **_kwargs):
+        output_hook({"msg_type": "stream", "content": {"name": "stdout", "text": "first"}})
+        await blocked.wait()
+
+    transport = LocalTransport()
+    transport.kernel_manager._kc = SimpleNamespace(
+        execute=Mock(), execute_interactive=AsyncMock(side_effect=execute_interactive)
+    )
+    task = asyncio.create_task(transport.execute("code", output_callback=callback))
+    await asyncio.wait_for(callback_started.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 1)
+    assert not any(t.get_name() == "ajt-output-callback" for t in asyncio.all_tasks())
+
+
+async def test_callback_self_cancellation_does_not_deadlock_execution():
+    async def callback(*_args):
+        raise asyncio.CancelledError
+
+    async def execute_interactive(*_args, output_hook, **_kwargs):
+        output_hook({"msg_type": "stream", "content": {"name": "stdout", "text": "first"}})
+        return {"content": {"status": "ok", "execution_count": 1}}
+
+    transport = LocalTransport()
+    transport.kernel_manager._kc = SimpleNamespace(
+        execute=Mock(), execute_interactive=AsyncMock(side_effect=execute_interactive)
+    )
+    result = await asyncio.wait_for(transport.execute("code", output_callback=callback), 1)
+
+    assert result.status == "ok"
+    assert result.callback_status == "error"
+    assert "CancelledError" in (result.callback_error or "")
+
+
+async def test_callback_timeout_is_reported_without_changing_kernel_status():
+    blocked = asyncio.Event()
+
+    async def callback(*_args):
+        await blocked.wait()
+
+    async def execute_interactive(*_args, output_hook, **_kwargs):
+        output_hook({"msg_type": "stream", "content": {"name": "stdout", "text": "first"}})
+        return {"content": {"status": "ok", "execution_count": 1}}
+
+    transport = LocalTransport(output_callback_timeout=0.01)
+    transport.kernel_manager._kc = SimpleNamespace(
+        execute=Mock(), execute_interactive=AsyncMock(side_effect=execute_interactive)
+    )
+    result = await asyncio.wait_for(transport.execute("code", output_callback=callback), 1)
+
+    assert result.status == "ok"
+    assert result.callback_status == "error"
+    assert "TimeoutError" in (result.callback_error or "")
+
+
+async def test_execution_state_coalesces_stream_chunks_without_losing_text():
+    state = ExecutionState()
+    for _ in range(1_000):
+        state.apply({"msg_type": "stream", "content": {"name": "stdout", "text": "x"}})
+
+    assert state.snapshot()[0][0]["text"] == "x" * 1_000
+    assert state.result().stdout == "x" * 1_000
+
+
+async def test_optional_kernel_workflows_are_capability_gated(monkeypatch):
+    transport = LocalTransport()
+    monkeypatch.setattr(
+        transport,
+        "kernel_info",
+        AsyncMock(return_value=KernelInfoResult(supported_features=[])),
+    )
+
+    with pytest.raises(UnsupportedKernelCapabilityError, match="kernel subshells"):
+        await transport.create_subshell()
+    with pytest.raises(UnsupportedKernelCapabilityError, match="debugger"):
+        await transport.debug({"seq": 1, "type": "request", "command": "debugInfo"})
+
+
+async def test_local_control_request_does_not_wait_for_shell_request_lock():
+    transport = LocalTransport()
+    transport._supported_features = {"debugger"}
+    message = {"header": {"msg_id": "debug-1"}}
+    client = SimpleNamespace(
+        session=SimpleNamespace(msg=Mock(return_value=message)),
+        control_channel=SimpleNamespace(send=Mock()),
+        _recv_reply=AsyncMock(return_value={"content": {"success": True, "command": "debugInfo"}}),
+    )
+    transport.kernel_manager._kc = client
+
+    async with transport._request_lock:
+        result = await asyncio.wait_for(
+            transport.debug({"seq": 1, "type": "request", "command": "debugInfo"}),
+            1,
+        )
+
+    assert result["success"] is True
+    client.control_channel.send.assert_called_once_with(message)
+
+
+async def test_server_routes_control_reply_while_execution_lock_is_held():
+    transport = ServerTransport(ServerConfig(base_url="http://unused"))
+    transport._session = SimpleNamespace()
+    transport._kernel_id = "kernel-1"
+    transport._supported_features = {"debugger"}
+    transport._ws = SimpleNamespace(
+        closed=False,
+        send_json=AsyncMock(),
+        send_bytes=AsyncMock(),
+    )
+
+    async with transport._exec_lock:
+        task = asyncio.create_task(
+            transport.debug({"seq": 1, "type": "request", "command": "debugInfo"})
+        )
+        for _ in range(10):
+            if transport._ws.send_json.await_count:
+                break
+            await asyncio.sleep(0)
+        request = transport._ws.send_json.await_args.args[0]
+        await transport._dispatch_frame(
+            {
+                "header": {"msg_type": "debug_reply"},
+                "parent_header": {"msg_id": request["header"]["msg_id"]},
+                "content": {"success": True, "command": "debugInfo"},
+            }
+        )
+        result = await asyncio.wait_for(task, 1)
+
+    assert result["success"] is True
+
+
+@pytest.mark.parametrize("callback_before_idle", [False, True])
+async def test_server_unregisters_execution_before_waiting_for_final_callback(
+    monkeypatch, callback_before_idle
+):
+    transport = ServerTransport(ServerConfig(base_url="http://unused", output_callback_timeout=1.0))
+    transport._session = SimpleNamespace()
+    transport._kernel_id = "kernel-1"
+    transport._supported_features = {"debugger"}
+    sent_requests = asyncio.Queue()
+    transport._ws = SimpleNamespace(
+        closed=False,
+        send_json=AsyncMock(side_effect=sent_requests.put),
+        send_bytes=AsyncMock(),
+    )
+    callback_started = asyncio.Event()
+    finalization_started = asyncio.Event()
+    release_callback = asyncio.Event()
+    original_finish = OutputCallbackDispatcher.finish
+
+    async def finish(dispatcher):
+        finalization_started.set()
+        return await original_finish(dispatcher)
+
+    monkeypatch.setattr(OutputCallbackDispatcher, "finish", finish)
+
+    async def callback(*_args):
+        callback_started.set()
+        await release_callback.wait()
+
+    execution = asyncio.create_task(transport.execute("pass", output_callback=callback))
+    debug = None
+    try:
+        execute_request = await asyncio.wait_for(sent_requests.get(), 1)
+        request_id = execute_request["header"]["msg_id"]
+        for msg_type, content in (
+            ("execute_reply", {"status": "ok"}),
+            ("status", {"execution_state": "idle"}),
+        ):
+            await transport._dispatch_frame(
+                {
+                    "header": {"msg_type": msg_type},
+                    "parent_header": {"msg_id": request_id},
+                    "content": content,
+                }
+            )
+            if callback_before_idle and msg_type == "execute_reply":
+                # Streaming callbacks may start before execution has settled.
+                await asyncio.wait_for(callback_started.wait(), 1)
+                assert request_id in transport._request_queues
+                assert not finalization_started.is_set()
+
+        await asyncio.wait_for(finalization_started.wait(), 1)
+        await asyncio.wait_for(callback_started.wait(), 1)
+        assert request_id not in transport._request_queues
+        assert not execution.done()
+
+        async def dispatch_late_output():
+            for _ in range(33):
+                await transport._dispatch_frame(
+                    {
+                        "header": {"msg_type": "stream"},
+                        "parent_header": {"msg_id": request_id},
+                        "content": {"name": "stdout", "text": "late"},
+                    }
+                )
+
+        await asyncio.wait_for(dispatch_late_output(), 1)
+
+        debug = asyncio.create_task(
+            transport.debug({"seq": 1, "type": "request", "command": "debugInfo"})
+        )
+        debug_request = await asyncio.wait_for(sent_requests.get(), 1)
+        await transport._dispatch_frame(
+            {
+                "header": {"msg_type": "debug_reply"},
+                "parent_header": {"msg_id": debug_request["header"]["msg_id"]},
+                "content": {"success": True},
+            }
+        )
+        assert (await asyncio.wait_for(debug, 1))["success"] is True
+    finally:
+        release_callback.set()
+        if debug is not None:
+            if not debug.done():
+                debug.cancel()
+            await asyncio.gather(debug, return_exceptions=True)
+        result = await asyncio.wait_for(execution, 1)
+
+    assert result.status == "ok"
+    assert result.callback_status == "ok"

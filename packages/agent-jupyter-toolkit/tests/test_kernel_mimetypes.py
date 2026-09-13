@@ -2,6 +2,8 @@
 Test mimetypes and serialization in kernel.
 """
 
+import json
+
 import pytest
 
 from agent_jupyter_toolkit.kernel import SessionConfig, create_session, serialization
@@ -25,3 +27,19 @@ async def test_kernel_mimetypes():
         assert mt == "image/png"
     finally:
         await sess.shutdown()
+
+
+async def test_serialization_survives_json_transport_boundary():
+    payload = serialization.serialize_value({"items": [1, 2, 3]})
+    transported = json.loads(json.dumps(payload))
+
+    assert serialization.deserialize_value(transported["data"], transported["metadata"]) == {
+        "items": [1, 2, 3]
+    }
+
+
+async def test_deserialization_accepts_native_json_mime_values():
+    assert serialization.deserialize_value(
+        {"application/json": {"items": [1, 2, 3]}},
+        {},
+    ) == {"items": [1, 2, 3]}

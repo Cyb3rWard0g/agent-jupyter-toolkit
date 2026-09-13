@@ -141,6 +141,26 @@ class NotebookDocumentTransport(Protocol):
         """
         ...
 
+    async def append_code_cell_with_id(
+        self,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> tuple[int, str]:
+        """Append a code cell and return its index and stable identifier.
+
+        Concrete transports SHOULD create and return the identifier in the
+        same serialized mutation. This compatibility implementation performs
+        a follow-up read and therefore cannot protect third-party transports
+        from a concurrent reorder between the two operations.
+        """
+        index = await self.append_code_cell(source, metadata=metadata, tags=tags)
+        cell = await self.get_cell(index)
+        cell_id = cell.get("id")
+        if not isinstance(cell_id, str) or not cell_id:
+            raise RuntimeError("Appended notebook cell has no stable id")
+        return index, cell_id
+
     async def insert_code_cell(
         self,
         index: int,
@@ -182,6 +202,32 @@ class NotebookDocumentTransport(Protocol):
             TypeError: if the target cell is not a code cell (implementation-dependent).
         """
         ...
+
+    async def update_cell_outputs_by_id(
+        self,
+        cell_id: str,
+        outputs: list[NbCellOutput],
+        execution_count: int | None,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Replace a code cell's outputs while checking its stable identity.
+
+        Implementations SHOULD resolve and update atomically. This default
+        preserves compatibility for third-party transports, but cannot close
+        a race between the lookup and positional update.
+        """
+        from .types import CellDeletedError, CellSourceChangedError
+
+        try:
+            index = await self.resolve_cell_index(cell_id)
+            cell = await self.get_cell(index)
+        except KeyError as exc:
+            raise CellDeletedError(f"Cell {cell_id!r} was deleted") from exc
+        if expected_source is not None and cell.get("source") != expected_source:
+            raise CellSourceChangedError(f"Cell {cell_id!r} source changed during execution")
+        await self.update_cell_outputs(index, outputs, execution_count)
+        return index
 
     async def append_markdown_cell(
         self,
@@ -231,6 +277,29 @@ class NotebookDocumentTransport(Protocol):
             IndexError: if index is out of range.
         """
         ...
+
+    async def set_cell_source_by_id(
+        self,
+        cell_id: str,
+        source: str,
+        *,
+        expected_source: str | None = None,
+    ) -> int:
+        """Set a cell's source while checking its stable identity.
+
+        Concrete transports SHOULD resolve, verify, and mutate atomically.
+        """
+        from .types import CellDeletedError, CellSourceChangedError
+
+        try:
+            index = await self.resolve_cell_index(cell_id)
+            cell = await self.get_cell(index)
+        except KeyError as exc:
+            raise CellDeletedError(f"Cell {cell_id!r} was deleted") from exc
+        if expected_source is not None and cell.get("source") != expected_source:
+            raise CellSourceChangedError(f"Cell {cell_id!r} source changed before update")
+        await self.set_cell_source(index, source)
+        return index
 
     async def get_cell(self, index: int) -> dict[str, Any]:
         """
@@ -407,6 +476,32 @@ class NotebookDocumentTransport(Protocol):
         Raises:
             RuntimeError: on IO/network errors.
             TypeError: if *updates* is not a dict.
+        """
+        ...
+
+    async def update_metadata_map(
+        self,
+        key: str,
+        updates: dict[str, Any],
+        *,
+        removals: list[str] | None = None,
+    ) -> None:
+        """Merge entries into one mapping-valued metadata field atomically.
+
+        Unlike :meth:`update_metadata`, this operation merges one level below
+        the notebook metadata. Implementations must serialize the complete
+        read/modify/write sequence. Collaborative transports should represent
+        individual entries as shared-map values so updates to different entry
+        names converge.
+
+        Args:
+            key: Top-level notebook metadata key containing the mapping.
+            updates: Entry names and JSON-compatible values to add or replace.
+            removals: Entry names to remove before applying *updates*.
+
+        Raises:
+            RuntimeError: on IO/network errors.
+            TypeError: if the arguments or stored value are not mappings.
         """
         ...
 

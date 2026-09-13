@@ -27,7 +27,10 @@ PostgreSQL tools for data workflows.
 ## Quick Start
 
 ```sh
-# Install just the toolkit
+# Install the toolkit with a managed local Python kernel
+pip install "agent-jupyter-toolkit[local]"
+
+# Install the kernel/document client without a bundled kernel
 pip install agent-jupyter-toolkit
 
 # Install toolkit + DataFrame serialization support
@@ -96,7 +99,7 @@ docker compose --profile postgres up -d
 ```sh
 git clone https://github.com/Cyb3rWard0g/agent-jupyter-toolkit.git
 cd agent-jupyter-toolkit
-uv sync --all-packages    # installs both packages + dev deps into .venv
+uv sync --all-packages --all-extras --dev
 ```
 
 ```sh

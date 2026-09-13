@@ -7,6 +7,7 @@ from .types import (
     HistoryResult,
     InspectResult,
     IsCompleteResult,
+    KernelDisconnectedError,
     KernelError,
     KernelExecutionError,
     KernelInfoResult,
@@ -14,6 +15,8 @@ from .types import (
     OutputCallback,
     ServerConfig,
     SessionConfig,
+    SessionInfo,
+    UnsupportedKernelCapabilityError,
 )
 
 __all__ = [
@@ -25,6 +28,7 @@ __all__ = [
     "IsCompleteResult",
     "KernelError",
     "KernelExecutionError",
+    "KernelDisconnectedError",
     "KernelInfoResult",
     "KernelTimeoutError",
     "KernelTransport",
@@ -32,5 +36,7 @@ __all__ = [
     "ServerConfig",
     "Session",
     "SessionConfig",
+    "SessionInfo",
+    "UnsupportedKernelCapabilityError",
     "create_session",
 ]

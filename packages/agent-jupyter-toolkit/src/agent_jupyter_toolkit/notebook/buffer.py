@@ -30,17 +30,24 @@ class NotebookBuffer(MutableSequence):
         self._transport = transport
         self._doc: dict[str, Any] | None = None
         self._dirty = False
+        self._revision: str | None = None
 
     async def load(self) -> None:
         """Fetch the notebook from the transport into memory."""
         self._doc = await self._transport.fetch()
+        self._revision = getattr(self._transport, "last_modified", None)
         self._dirty = False
 
     async def commit(self) -> None:
         """Persist the in-memory notebook to the transport."""
         self._ensure_loaded()
         if self._dirty:
-            await self._transport.save(self._doc)
+            save_snapshot = getattr(self._transport, "save_snapshot", None)
+            if callable(save_snapshot):
+                await save_snapshot(self._doc, self._revision)
+                self._revision = getattr(self._transport, "last_modified", None)
+            else:
+                await self._transport.save(self._doc)
             self._dirty = False
 
     @property

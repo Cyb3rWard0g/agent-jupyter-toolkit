@@ -56,6 +56,12 @@ def main() -> None:
         help="Transport: stdio (default), sse, streamable-http",
     )
     parser.add_argument(
+        "--collaboration-mode",
+        choices=("required", "preferred", "disabled"),
+        default=None,
+        help="Notebook collaboration policy (default: preferred)",
+    )
+    parser.add_argument(
         "--host",
         default=None,
         help="Host for HTTP transports (default: 127.0.0.1)",
