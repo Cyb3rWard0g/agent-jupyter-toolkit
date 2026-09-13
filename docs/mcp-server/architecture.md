@@ -205,9 +205,9 @@ The server uses FastMCP's lifespan pattern to manage all notebook sessions:
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     manager = SessionManager(config=_server_config)
     default_path = _server_config.get("notebook_path")
-    if default_path:
-        await manager.open(default_path)
     try:
+        if default_path:
+            await manager.open(default_path)
         yield AppContext(manager=manager)
     finally:
         await manager.close_all()

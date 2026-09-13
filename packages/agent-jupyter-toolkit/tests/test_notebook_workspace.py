@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 
 import agent_jupyter_toolkit.notebook._workspace_files as workspace_files
@@ -466,6 +467,79 @@ async def test_cancelled_close_all_drains_every_session_before_propagating(monke
     assert len(manager) == 0
     with pytest.raises(RuntimeError, match="shutting down"):
         await manager.delete("after-shutdown.ipynb")
+
+
+@pytest.mark.asyncio
+async def test_close_all_preserves_anyio_cancel_scope(monkeypatch):
+    manager = NotebookWorkspace(NotebookWorkspaceConfig(mode="server"))
+    finish_stop = asyncio.Event()
+    session = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(side_effect=finish_stop.wait),
+    )
+    monkeypatch.setattr(manager, "_build_session", lambda _path: session)
+    await manager.open("anyio-cancel.ipynb")
+
+    with anyio.CancelScope() as scope:
+        asyncio.get_running_loop().call_soon(scope.cancel)
+        asyncio.get_running_loop().call_later(0.01, finish_stop.set)
+        await manager.close_all()
+
+    assert scope.cancelled_caught is True
+    assert len(manager) == 0
+
+
+@pytest.mark.asyncio
+async def test_close_all_preserves_external_cancel_over_timeout(monkeypatch):
+    manager = NotebookWorkspace(NotebookWorkspaceConfig(mode="server"))
+    stop_started = asyncio.Event()
+    finish_stop = asyncio.Event()
+
+    async def slow_stop():
+        stop_started.set()
+        await finish_stop.wait()
+
+    session = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(side_effect=slow_stop))
+    monkeypatch.setattr(manager, "_build_session", lambda _path: session)
+    await manager.open("overlapping-cancel.ipynb")
+    timeout_ready = asyncio.Event()
+    timeout_holder = {}
+
+    async def cancelled_caller():
+        timeout = asyncio.timeout(None)
+        timeout_holder["timeout"] = timeout
+        timeout_ready.set()
+        try:
+            async with timeout:
+                await manager.close_all()
+        except BaseException as exc:
+            return exc, asyncio.current_task().cancelling()
+        raise AssertionError("shutdown should have been cancelled")
+
+    caller = asyncio.create_task(cancelled_caller())
+
+    async def wait_for_cancellation_count(expected):
+        for _ in range(100):
+            if caller.cancelling() >= expected:
+                return
+            await asyncio.sleep(0)
+        pytest.fail(f"caller did not reach {expected} cancellation request(s)")
+
+    await timeout_ready.wait()
+    await stop_started.wait()
+    timeout_holder["timeout"].reschedule(asyncio.get_running_loop().time())
+    await wait_for_cancellation_count(1)
+    await asyncio.sleep(0)
+    caller.cancel("external shutdown cancellation")
+    await wait_for_cancellation_count(2)
+    await asyncio.sleep(0)
+    finish_stop.set()
+
+    error, cancellation_count = await caller
+    assert isinstance(error, asyncio.CancelledError)
+    assert error.args == ("external shutdown cancellation",)
+    assert cancellation_count == 1
+    assert len(manager) == 0
 
 
 @pytest.mark.asyncio

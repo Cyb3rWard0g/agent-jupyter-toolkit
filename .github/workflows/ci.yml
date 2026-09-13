@@ -36,6 +36,58 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check packages/
 
+  test-built-packages:
+    name: Test built toolkit and MCP wheels
+    runs-on: ubuntu-latest
+    env:
+      SETUPTOOLS_SCM_PRETEND_VERSION: "0.8.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build tools
+        run: uv sync --locked --all-packages --all-extras --dev
+
+      - name: Build wheel pair
+        run: |
+          uv run python -m build --wheel \
+            --outdir "$RUNNER_TEMP/toolkit-dist" \
+            packages/agent-jupyter-toolkit
+          uv run python -m build --wheel \
+            --outdir "$RUNNER_TEMP/mcp-dist" \
+            packages/mcp-jupyter-notebook
+
+      - name: Install wheels outside the workspace
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-env"
+          uv pip install \
+            --python "$RUNNER_TEMP/wheel-env/bin/python" \
+            "$RUNNER_TEMP/toolkit-dist"/*.whl \
+            "$RUNNER_TEMP/mcp-dist"/*.whl
+
+      - name: Verify versions and workspace imports
+        run: |
+          "$RUNNER_TEMP/wheel-env/bin/python" - <<'PY'
+          from importlib.metadata import version
+
+          from agent_jupyter_toolkit.notebook import NotebookWorkspace
+          from mcp_jupyter_notebook.context import SessionManager
+
+          assert version("agent-jupyter-toolkit") == "0.8.0"
+          assert version("mcp-jupyter-notebook") == "0.8.0"
+          assert NotebookWorkspace.__name__ == "NotebookWorkspace"
+          assert SessionManager.__name__ == "SessionManager"
+          PY
+
   test-toolkit:
     name: Test agent-jupyter-toolkit (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

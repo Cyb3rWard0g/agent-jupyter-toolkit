@@ -301,7 +301,7 @@ class NotebookWorkspace:
     async def _wait_for_shutdown(task: asyncio.Task[None]) -> None:
         """Delay caller cancellation until the retained shutdown task has drained."""
         current = asyncio.current_task()
-        caller_cancelled = False
+        caller_cancellation: asyncio.CancelledError | None = None
         shutdown_error: BaseException | None = None
 
         while not task.done():
@@ -310,9 +310,10 @@ class NotebookWorkspace:
             except asyncio.CancelledError as exc:
                 if current is None or current.cancelling() == 0:
                     raise
-                while current.cancelling():
-                    current.uncancel()
-                    caller_cancelled = True
+                # Keep the task's cancellation count intact so the scope that
+                # issued it can distinguish its own request from later ones.
+                # Retain the latest exception to preserve its message/identity.
+                caller_cancellation = exc
                 if task.cancelled():
                     shutdown_error = exc
                     break
@@ -326,7 +327,7 @@ class NotebookWorkspace:
             except BaseException as exc:
                 shutdown_error = exc
 
-        if caller_cancelled:
+        if caller_cancellation is not None:
             if shutdown_error is not None:
                 log.error(
                     "Workspace shutdown failed while its caller was cancelled",
@@ -336,11 +337,9 @@ class NotebookWorkspace:
                         shutdown_error.__traceback__,
                     ),
                 )
-            # The caught cancellation requests have already been consumed and
-            # removed with uncancel(). Re-scheduling them before raising here
-            # leaves a pending cancellation behind on Python 3.11 and 3.12,
-            # which then appears unexpectedly at the caller's next await.
-            raise asyncio.CancelledError() from shutdown_error
+            if shutdown_error is None or shutdown_error is caller_cancellation:
+                raise caller_cancellation
+            raise caller_cancellation from shutdown_error
 
         if shutdown_error is not None:
             raise shutdown_error
