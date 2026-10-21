@@ -45,6 +45,10 @@ postgresql = [
   "agent-data-toolkit[postgresql]",
 ]
 
+azure-monitor = [
+  "agent-data-toolkit[azure-monitor]>=0.3.0,<0.4",
+]
+
 dev = [
   "pytest>=9.0.2",
   "pytest-asyncio>=1.3.0",

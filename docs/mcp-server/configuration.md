@@ -92,6 +92,11 @@ To enable additional tool domains (for example PostgreSQL helper tools), set:
 - `MCP_JUPYTER_ENABLE_TOOLS=postgresql`, or
 - `--enable-tools postgresql`
 
+Azure Monitor Logs / Sentinel uses `--enable-tools azure-monitor` or
+`MCP_JUPYTER_ENABLE_TOOLS=azure-monitor`. Install the optional connector in the
+kernel environment and configure its `AZURE_LOGS_*` settings there. See
+[Azure Monitor tools](azure-monitor.md) for identity, query and partial-result behavior.
+
 ### Important: where database env vars live
 
 In **server mode**, the kernel runs on the **Jupyter server**, not inside the MCP server process.

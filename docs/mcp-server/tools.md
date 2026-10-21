@@ -1,10 +1,15 @@
 # Tools Reference
 
-The MCP Jupyter Notebook server exposes **43 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** for database exploration and query→DataFrame workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
+The MCP Jupyter Notebook server exposes **43 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** and **3 optional Azure Monitor Logs tools** for notebook-native data workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
 
 > **Multi-notebook support:** Tools operating on a session accept an optional `notebook_path`. When omitted, they target the manager's default notebook. Lifecycle tools such as opening and closing require an explicit path.
 
 > **PostgreSQL tools:** Enable with `MCP_JUPYTER_ENABLE_TOOLS=postgresql` or `--enable-tools postgresql`. See [Configuration](configuration.md) for details.
+
+> **Azure Monitor Logs / Sentinel tools:** Enable with `--enable-tools azure-monitor`.
+> `azure_monitor_connect`, `azure_monitor_query_to_df` and `azure_monitor_close`
+> execute through the notebook kernel and retain query results for follow-up cells.
+> See [setup, arguments and result semantics](azure-monitor.md).
 
 ### Tool Annotations
 

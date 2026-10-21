@@ -88,6 +88,18 @@ jobs:
           assert SessionManager.__name__ == "SessionManager"
           PY
 
+      - name: Verify Azure Monitor extra and actual kernel against installed wheels
+        run: |
+          for wheel in "$RUNNER_TEMP/mcp-dist"/*.whl; do
+            uv pip install --python "$RUNNER_TEMP/wheel-env/bin/python" \
+              "$wheel[azure-monitor]" pytest pytest-asyncio ipykernel
+          done
+          "$RUNNER_TEMP/wheel-env/bin/python" -c \
+            'from agent_data_toolkit.azure_monitor import AzureMonitorLogsClient'
+          "$RUNNER_TEMP/wheel-env/bin/python" -m pytest \
+            packages/mcp-jupyter-notebook/tests/integration/test_azure_monitor_kernel.py \
+            -q --import-mode=importlib -o pythonpath=
+
   test-toolkit:
     name: Test agent-jupyter-toolkit (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

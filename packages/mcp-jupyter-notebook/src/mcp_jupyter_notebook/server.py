@@ -246,6 +246,11 @@ def create_server() -> FastMCP:
 
         register_postgresql_tools(mcp)
 
+    if "azure-monitor" in enabled_tools or "azure_monitor" in enabled_tools:
+        from mcp_jupyter_notebook.tools.azure_monitor import register_azure_monitor_tools
+
+        register_azure_monitor_tools(mcp)
+
     return mcp
 
 
