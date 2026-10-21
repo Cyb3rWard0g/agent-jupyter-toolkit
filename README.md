@@ -94,6 +94,41 @@ docker compose --profile postgres up -d
 # Postgres seeded with a demo_users table
 ```
 
+## Azure Monitor Logs / Sentinel notebooks
+
+The optional `azure-monitor` tools follow the PostgreSQL execution model: the
+client lives **inside the notebook kernel**, the query is a visible code cell,
+and its DataFrame remains available for follow-up analysis.
+
+Install `agent-data-toolkit[azure-monitor]` in the Jupyter kernel environment.
+Configure that environment with `AZURE_LOGS_WORKSPACE_ID` and an explicit
+`AZURE_LOGS_AUTH=managed-identity` (optionally `AZURE_CLIENT_ID`) or `azure-cli`.
+For local Azure CLI authentication, the kernel must have access to the intended
+CLI installation and authenticated account; the MCP host's login is not inherited
+by a remote kernel.
+
+```sh
+mcp-jupyter-notebook --mode server --base-url http://localhost:8888 \
+  --token "$JUPYTER_TOKEN" --enable-tools azure-monitor
+```
+
+Use `azure_monitor_connect`, `azure_monitor_query_to_df` and `azure_monitor_close`.
+The query tool takes an explicit absolute time window, appends a visible KQL
+query cell, and returns the cell identity, execution/persistence status and
+metadata from that exact retained result. It never runs a second source query
+to generate the preview. Opening the same notebook reuses its live client and
+variables while its kernel survives.
+
+Source-partial and client-truncated responses are retained, but DataFrame creation
+requires explicit `allow_partial=true`. Timeouts/disconnects may leave an unknown
+outcome: inspect the retained result before deciding to rerun. This tool does not
+automatically retry the notebook query. Azure SDK transport retries are separate.
+
+The runtime's Azure identity is usable by all code in its kernel. These tools do
+not enforce an external application's plan allowlist or investigation authority.
+Use runtime identity/RBAC and deployment isolation appropriate to that application.
+See [the tool reference](docs/mcp-server/azure-monitor.md).
+
 ## Development
 
 ```sh

@@ -14,6 +14,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 
 - **Rich MCP tool surface** — notebook lifecycle, code execution, markdown, stable cell-ID operations, packages, kernel control, introspection, variables
 - **Optional PostgreSQL tools** — enable on demand to create a DB client/connection in the kernel
+- **Optional Azure Monitor Logs / Sentinel tools** — visible KQL query cells, reusable kernel clients and retained DataFrames; [setup and result semantics](../../docs/mcp-server/azure-monitor.md)
 - **Real-time sync** — Yjs collaboration transport shows cell edits instantly in JupyterLab
 - **Two session modes** — connect to a remote Jupyter server or run a local kernel
 - **Three transports** — stdio (for editors), SSE, or streamable HTTP

@@ -93,6 +93,8 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download toolkit artifact
         uses: actions/download-artifact@v4
         with:
@@ -112,6 +114,16 @@ jobs:
 
       - name: Install built wheels together
         run: python -m pip install dist/toolkit/*.whl dist/mcp/*.whl
+
+      - name: Verify Azure Monitor extra and actual kernel against installed wheels
+        run: |
+          for wheel in dist/mcp/*.whl; do
+            python -m pip install "$wheel[azure-monitor]" pytest pytest-asyncio ipykernel
+          done
+          python -c 'from agent_data_toolkit.azure_monitor import AzureMonitorLogsClient'
+          python -m pytest \
+            packages/mcp-jupyter-notebook/tests/integration/test_azure_monitor_kernel.py \
+            -q --import-mode=importlib -o pythonpath=
 
       - name: Verify versions and workspace imports
         env:
