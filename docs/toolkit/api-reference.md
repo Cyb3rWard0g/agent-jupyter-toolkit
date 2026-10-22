@@ -3,6 +3,31 @@
 Complete reference for all public classes, functions, and types in
 `agent-jupyter-toolkit`.
 
+## `agent_jupyter_toolkit.actions` (optional `actions` extra)
+
+`NotebookActions(workspace)` keeps a caller-owned `NotebookWorkspace` and exposes
+19 named actions independently of MCP. It does not open/close that containing
+workspace for each call. `definitions()` returns fresh `NotebookActionDefinition`
+records with `name`, `title`, `description` and `input_schema`, derived from the
+same typed methods. `await invoke(name, arguments)` uses an explicit registry and
+strict Pydantic validation; unsupported names/extra fields fail before dispatch.
+
+The selected methods are `open`, `close`, `list`, `code_run`, `markdown_add`,
+`read`, `cell_read_by_id`, `cell_source_by_id`, `cell_source_set_by_id`,
+`packages_check`, `dependencies_list`, `kernel_info`, `session_info`, `inspect`,
+`complete`, `code_is_complete`, `variables_list`, `variable_get` and `variable_set`.
+The existing MCP tools retain their `notebook_` names and signatures while using
+these implementations and descriptions. Other MCP operations remain supported
+by their current SDK paths.
+
+Input schemas describe callable behavior, not source or notebook authorization.
+The host chooses allowed actions, trusted workspace configuration, concurrency
+and retry policy. Structured execution results retain cell/request identity,
+source hash, kernel generation, execution outcome, callback/save status and
+truncation fields. Kernel generation inside a Python session is not a durable
+cross-process owner identity. No MCP package is required by this optional API;
+the base SDK can still be installed without Pydantic.
+
 ## `agent_jupyter_toolkit.kernel`
 
 ### `create_session(config=None)`

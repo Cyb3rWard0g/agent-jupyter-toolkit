@@ -6,9 +6,10 @@ from typing import Any
 
 from mcp.types import ToolAnnotations
 
+from agent_jupyter_toolkit.actions import NotebookActions
 from mcp_jupyter_notebook._mcp import Context, FastMCP
 
-from .common import get_session
+from .common import get_manager, shared_action
 
 
 def register_variable_tools(
@@ -30,14 +31,14 @@ def register_variable_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("variables_list")
     async def notebook_variables_list(
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """List all user-defined variables in the kernel."""
-        session = get_session(ctx, notebook_path)
-        variables = await get_variables_fn(session.kernel)
-        return {"ok": True, "variables": variables}
+        return await NotebookActions(
+            get_manager(ctx), get_variables_fn=get_variables_fn
+        ).variables_list(notebook_path=notebook_path)
 
     @mcp.tool(
         title="Get Variable",
@@ -49,15 +50,15 @@ def register_variable_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("variable_get")
     async def notebook_variable_get(
         name: str,
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Get the value of a specific variable from the kernel."""
-        session = get_session(ctx, notebook_path)
-        value = await get_variable_value_fn(session.kernel, name)
-        return {"ok": value is not None, "name": name, "value": value}
+        return await NotebookActions(
+            get_manager(ctx), get_variable_value_fn=get_variable_value_fn
+        ).variable_get(name=name, notebook_path=notebook_path)
 
     @mcp.tool(
         title="Set Variable",
@@ -69,18 +70,14 @@ def register_variable_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("variable_set")
     async def notebook_variable_set(
         name: str,
         value: Any,
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Set a variable in the kernel's global scope."""
-        session = get_session(ctx, notebook_path)
         await ctx.info(f"Setting variable '{name}'")
-        try:
-            variable_manager = variable_manager_cls(session.kernel)
-            await variable_manager.set(name, value)
-            return {"ok": True, "name": name}
-        except Exception as exc:
-            return {"ok": False, "name": name, "error": str(exc)}
+        return await NotebookActions(
+            get_manager(ctx), variable_manager_cls=variable_manager_cls
+        ).variable_set(name=name, value=value, notebook_path=notebook_path)

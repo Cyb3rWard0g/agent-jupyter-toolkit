@@ -35,6 +35,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+actions = [
+  "pydantic>=2.12.5,<3",
+]
 local = [
   "ipykernel>=7.3.0",
 ]

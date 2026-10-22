@@ -6,15 +6,15 @@ from typing import Any
 
 from mcp.types import ToolAnnotations
 
+from agent_jupyter_toolkit.actions import NotebookActions
 from mcp_jupyter_notebook._mcp import Context, FastMCP
 
 from .common import (
-    cell_id_for_index,
+    get_manager,
     get_session,
     move_after_index,
     move_before_index,
-    normalize_source,
-    summarize_cell,
+    shared_action,
 )
 
 
@@ -35,22 +35,16 @@ def register_document_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("markdown_add")
     async def notebook_markdown_add(
         content: str,
         ctx: Context,
         notebook_path: str | None = None,
         position: int | None = None,
     ) -> dict[str, Any]:
-        """Add a markdown cell to the notebook."""
-        session = get_session(ctx, notebook_path)
-        result = await invoke_markdown_cell_fn(session, content, index=position)
-        return {
-            "ok": result.status == "ok",
-            "cell_index": result.cell_index,
-            "cell_id": await cell_id_for_index(session, result.cell_index),
-            "error_message": result.error_message,
-            "elapsed_seconds": result.elapsed_seconds,
-        }
+        return await NotebookActions(
+            get_manager(ctx), invoke_markdown_cell_fn=invoke_markdown_cell_fn
+        ).markdown_add(content=content, notebook_path=notebook_path, position=position)
 
     @mcp.tool(
         title="Read Notebook",
@@ -62,22 +56,12 @@ def register_document_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("read")
     async def notebook_read(
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Read the full notebook content."""
-        session = get_session(ctx, notebook_path)
-        notebook = await session.doc.fetch()
-        cells_summary = [
-            summarize_cell(cell, index) for index, cell in enumerate(notebook.get("cells", []))
-        ]
-        return {
-            "ok": True,
-            "cell_count": len(cells_summary),
-            "cells": cells_summary,
-            "metadata": notebook.get("metadata", {}),
-        }
+        return await NotebookActions(get_manager(ctx)).read(notebook_path=notebook_path)
 
     @mcp.tool(
         title="Read Cell",
@@ -117,18 +101,15 @@ def register_document_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("cell_read_by_id")
     async def notebook_cell_read_by_id(
         cell_id: str,
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Read a single cell using its stable Jupyter cell ID."""
-        session = get_session(ctx, notebook_path)
-        try:
-            cell = await session.doc.get_cell_by_id(cell_id)
-            return {"ok": True, "cell_id": cell_id, "cell": cell}
-        except KeyError as exc:
-            return {"ok": False, "error": str(exc)}
+        return await NotebookActions(get_manager(ctx)).cell_read_by_id(
+            cell_id=cell_id, notebook_path=notebook_path
+        )
 
     @mcp.tool(
         title="Read Cell Source",
@@ -163,22 +144,15 @@ def register_document_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("cell_source_by_id")
     async def notebook_cell_source_by_id(
         cell_id: str,
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Read only the source text of a cell using its stable ID."""
-        session = get_session(ctx, notebook_path)
-        try:
-            cell = await session.doc.get_cell_by_id(cell_id)
-            return {
-                "ok": True,
-                "cell_id": cell_id,
-                "source": normalize_source(cell.get("source", "")),
-            }
-        except KeyError as exc:
-            return {"ok": False, "error": str(exc)}
+        return await NotebookActions(get_manager(ctx)).cell_source_by_id(
+            cell_id=cell_id, notebook_path=notebook_path
+        )
 
     @mcp.tool(
         title="Set Cell Source By ID",
@@ -190,26 +164,17 @@ def register_document_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("cell_source_set_by_id")
     async def notebook_cell_source_set_by_id(
         cell_id: str,
         source: str,
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Replace a cell's source using its stable ID without executing it."""
-        session = get_session(ctx, notebook_path)
         await ctx.info(f"Updating source for cell {cell_id}")
-        try:
-            cell_index = await session.doc.resolve_cell_index(cell_id)
-            await session.doc.set_cell_source(cell_index, source)
-            return {
-                "ok": True,
-                "cell_id": cell_id,
-                "cell_index": cell_index,
-                "source": source,
-            }
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+        return await NotebookActions(get_manager(ctx)).cell_source_set_by_id(
+            cell_id=cell_id, source=source, notebook_path=notebook_path
+        )
 
     @mcp.tool(
         title="Cell Count",
