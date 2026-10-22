@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 
 import pytest
@@ -31,7 +32,13 @@ async def test_server_execute_ok():
     sess = create_session(cfg)
     await sess.start()
     try:
-        res = await sess.execute("print('hello from server')\n40+2")
+        if expected_python := os.getenv("JAT_SERVER_PYTHON"):
+            identity = await sess.execute(
+                "import json, sys\nprint(json.dumps([sys.executable, sys.prefix]))", timeout=10
+            )
+            assert identity.status == "ok"
+            assert json.loads(identity.stdout) == [expected_python, os.environ["JAT_SERVER_PREFIX"]]
+        res = await sess.execute("print('hello from server')\n40+2", timeout=10)
         assert res.status == "ok"
         assert "hello from server" in res.stdout
         assert any(
@@ -63,7 +70,9 @@ async def test_server_optional_control_channel_workflows():
         if "kernel subshells" in info.supported_features:
             subshell_id = await sess.create_subshell()
             assert subshell_id in await sess.list_subshells()
-            result = await sess.execute("print('remote subshell')", subshell_id=subshell_id)
+            result = await sess.execute(
+                "print('remote subshell')", subshell_id=subshell_id, timeout=10
+            )
             assert result.status == "ok"
             assert result.stdout == "remote subshell\n"
     finally:
@@ -85,20 +94,20 @@ async def test_server_restart_clears_namespace_and_keeps_session_usable():
     sess = create_session(cfg)
     await sess.start()
     try:
-        first = await sess.execute("x = 41")
+        first = await sess.execute("x = 41", timeout=10)
         assert first.status == "ok"
 
-        before_restart = await sess.execute("print(x)")
+        before_restart = await sess.execute("print(x)", timeout=10)
         assert before_restart.status == "ok"
         assert "41" in before_restart.stdout
 
         await sess.restart()
 
-        after_restart = await sess.execute("print('server kernel alive after restart')")
+        after_restart = await sess.execute("print('server kernel alive after restart')", timeout=10)
         assert after_restart.status == "ok"
         assert "server kernel alive after restart" in after_restart.stdout
 
-        missing_name = await sess.execute("x")
+        missing_name = await sess.execute("x", timeout=10)
         assert missing_name.status == "error"
         assert any(
             output.get("output_type") == "error" and output.get("ename") == "NameError"
@@ -120,13 +129,13 @@ async def test_notebook_session_reuse_and_borrowed_shutdown_preserves_kernel():
     borrower = create_session(SessionConfig(mode="server", server=server))
     await owner.start()
     try:
-        await owner.execute("shared_value = 41")
+        await owner.execute("shared_value = 41", timeout=10)
         await borrower.start()
         assert borrower.session_info().kernel_id == owner.session_info().kernel_id
         assert borrower.session_info().owns_kernel is False
         await borrower.shutdown()
 
-        result = await owner.execute("shared_value + 1")
+        result = await owner.execute("shared_value + 1", timeout=10)
         assert result.outputs[-1]["data"]["text/plain"] == "42"
     finally:
         await borrower.shutdown()

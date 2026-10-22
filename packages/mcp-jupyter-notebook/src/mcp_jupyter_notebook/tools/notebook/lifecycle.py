@@ -6,9 +6,10 @@ from typing import Any
 
 from mcp.types import ToolAnnotations
 
+from agent_jupyter_toolkit.actions import NotebookActions
 from mcp_jupyter_notebook._mcp import Context, FastMCP
 
-from .common import get_manager
+from .common import get_manager, shared_action
 
 
 def register_lifecycle_tools(mcp: FastMCP) -> None:
@@ -24,26 +25,16 @@ def register_lifecycle_tools(mcp: FastMCP) -> None:
             open_world_hint=True,
         ),
     )
+    @shared_action("open")
     async def notebook_open(
         notebook_path: str,
         ctx: Context,
         set_default: bool = False,
     ) -> dict[str, Any]:
-        """Open or reuse a notebook session; set_default switches subsequent pathless calls."""
-        manager = get_manager(ctx)
         await ctx.info(f"Opening notebook: {notebook_path}")
-        try:
-            await manager.open(notebook_path)
-            if set_default:
-                manager.set_default(notebook_path)
-            return {
-                "ok": True,
-                "notebook_path": notebook_path,
-                "is_default": manager.is_default(notebook_path),
-                "open_notebooks": manager.paths,
-            }
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+        return await NotebookActions(get_manager(ctx)).open(
+            notebook_path=notebook_path, set_default=set_default
+        )
 
     @mcp.tool(
         title="Close Notebook",
@@ -55,20 +46,13 @@ def register_lifecycle_tools(mcp: FastMCP) -> None:
             open_world_hint=False,
         ),
     )
+    @shared_action("close")
     async def notebook_close(
         notebook_path: str,
         ctx: Context,
     ) -> dict[str, Any]:
-        """Close a notebook session and release its resources."""
-        manager = get_manager(ctx)
         await ctx.info(f"Closing notebook: {notebook_path}")
-        closed = await manager.close(notebook_path)
-        return {
-            "ok": closed,
-            "notebook_path": notebook_path,
-            "default_notebook": manager.default_path,
-            "open_notebooks": manager.paths,
-        }
+        return await NotebookActions(get_manager(ctx)).close(notebook_path=notebook_path)
 
     @mcp.tool(
         title="List Open Notebooks",
@@ -80,16 +64,11 @@ def register_lifecycle_tools(mcp: FastMCP) -> None:
             open_world_hint=False,
         ),
     )
+    @shared_action("list")
     async def notebook_list(
         ctx: Context,
     ) -> dict[str, Any]:
-        """List all currently open notebook sessions."""
-        manager = get_manager(ctx)
-        return {
-            "ok": True,
-            "default_notebook": manager.default_path,
-            "notebooks": manager.list_sessions(),
-        }
+        return await NotebookActions(get_manager(ctx)).list()
 
     @mcp.tool(
         title="List Notebook Files",

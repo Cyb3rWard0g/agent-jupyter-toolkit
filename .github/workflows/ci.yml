@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Keep source/extra installs consistent with the upcoming wheel pair on PRs.
+  SETUPTOOLS_SCM_PRETEND_VERSION: "0.10.0"
+
 jobs:
   lint:
     name: Lint
@@ -39,8 +43,6 @@ jobs:
   test-built-packages:
     name: Test built toolkit and MCP wheels
     runs-on: ubuntu-latest
-    env:
-      SETUPTOOLS_SCM_PRETEND_VERSION: "0.8.0"
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +73,22 @@ jobs:
           python -m venv "$RUNNER_TEMP/wheel-env"
           uv pip install \
             --python "$RUNNER_TEMP/wheel-env/bin/python" \
+            "$RUNNER_TEMP/toolkit-dist"/*.whl
+          "$RUNNER_TEMP/wheel-env/bin/python" - <<'PY'
+          import importlib.abc
+          import sys
+
+          class BlockOptional(importlib.abc.MetaPathFinder):
+              def find_spec(self, fullname, path=None, target=None):
+                  if fullname.split(".")[0] in {"pydantic", "mcp", "mcp_jupyter_notebook"}:
+                      raise ImportError("optional dependency is deliberately unavailable")
+
+          sys.meta_path.insert(0, BlockOptional())
+          from agent_jupyter_toolkit.notebook import NotebookWorkspace
+          assert NotebookWorkspace.__name__ == "NotebookWorkspace"
+          PY
+          uv pip install \
+            --python "$RUNNER_TEMP/wheel-env/bin/python" \
             "$RUNNER_TEMP/toolkit-dist"/*.whl \
             "$RUNNER_TEMP/mcp-dist"/*.whl
 
@@ -80,11 +98,13 @@ jobs:
           from importlib.metadata import version
 
           from agent_jupyter_toolkit.notebook import NotebookWorkspace
+          from agent_jupyter_toolkit.actions import NotebookActions
           from mcp_jupyter_notebook.context import SessionManager
 
-          assert version("agent-jupyter-toolkit") == "0.8.0"
-          assert version("mcp-jupyter-notebook") == "0.8.0"
+          assert version("agent-jupyter-toolkit") == "0.10.0"
+          assert version("mcp-jupyter-notebook") == "0.10.0"
           assert NotebookWorkspace.__name__ == "NotebookWorkspace"
+          assert len(NotebookActions.definitions()) == 19
           assert SessionManager.__name__ == "SessionManager"
           PY
 
@@ -161,6 +181,9 @@ jobs:
   test-server-integration:
     name: Test real Jupyter Server transport
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      JUPYTER_PATH: ${{ github.workspace }}/.venv/share/jupyter
     steps:
       - uses: actions/checkout@v4
 
@@ -174,6 +197,15 @@ jobs:
 
       - name: Install integration dependencies
         run: uv sync --locked --all-packages --all-extras --dev
+
+      - name: Bind the server kernel to the locked environment
+        run: |
+          uv run python -m ipykernel install --sys-prefix --name python3
+          uv run python - <<'PY' >> "$GITHUB_ENV"
+          import sys
+          print(f"JAT_SERVER_PYTHON={sys.executable}")
+          print(f"JAT_SERVER_PREFIX={sys.prefix}")
+          PY
 
       - name: Start isolated Jupyter Server
         run: |
@@ -196,6 +228,7 @@ jobs:
           exit 1
 
       - name: Run server transport tests
+        timeout-minutes: 3
         env:
           JAT_SERVER_URL: http://127.0.0.1:8899
           JAT_SERVER_TOKEN: jat-token
@@ -205,7 +238,7 @@ jobs:
           uv run pytest \
             packages/agent-jupyter-toolkit/tests/test_transport_server_smoke.py \
             packages/agent-jupyter-toolkit/tests/test_collaboration_server_smoke.py \
-            -q
+            -vv -o faulthandler_timeout=30
 
       - name: Stop Jupyter Server
         if: always()

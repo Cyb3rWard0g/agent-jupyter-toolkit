@@ -7,9 +7,10 @@ from typing import Any
 
 from mcp.types import ToolAnnotations
 
+from agent_jupyter_toolkit.actions import NotebookActions
 from mcp_jupyter_notebook._mcp import Context, FastMCP
 
-from .common import get_manager, get_session
+from .common import get_manager, get_session, shared_action
 
 
 def register_kernel_tools(
@@ -94,15 +95,15 @@ def register_kernel_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("packages_check")
     async def notebook_packages_check(
         packages: list[str],
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Check which packages are available in the kernel without installing."""
-        session = get_session(ctx, notebook_path)
-        availability = await check_package_availability_fn(session.kernel, packages)
-        return {"ok": True, "packages": availability}
+        return await NotebookActions(
+            get_manager(ctx), check_package_availability_fn=check_package_availability_fn
+        ).packages_check(packages=packages, notebook_path=notebook_path)
 
     @mcp.tool(
         title="List Tracked Dependencies",
@@ -114,22 +115,14 @@ def register_kernel_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("dependencies_list")
     async def notebook_dependencies_list(
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """List packages that have been installed and tracked in the notebook metadata.
-
-        Returns the dependency manifest stored under notebook.metadata.agent_dependencies,
-        showing each package's version and when it was installed.
-        """
-        session = get_session(ctx, notebook_path)
-        deps = await session.get_tracked_dependencies()
-        return {
-            "ok": True,
-            "dependencies": deps,
-            "count": len(deps),
-        }
+        return await NotebookActions(get_manager(ctx)).dependencies_list(
+            notebook_path=notebook_path
+        )
 
     @mcp.tool(
         title="Interrupt Kernel",
@@ -164,24 +157,12 @@ def register_kernel_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("kernel_info")
     async def notebook_kernel_info(
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Get detailed kernel metadata."""
-        session = get_session(ctx, notebook_path)
-        info = await session.kernel.kernel_info()
-        return {
-            "ok": info.status == "ok",
-            "protocol_version": info.protocol_version,
-            "implementation": info.implementation,
-            "implementation_version": info.implementation_version,
-            "language_info": info.language_info,
-            "banner": info.banner,
-            "help_links": info.help_links,
-            "supported_features": info.supported_features,
-            "raw_content": info.raw_content,
-        }
+        return await NotebookActions(get_manager(ctx)).kernel_info(notebook_path=notebook_path)
 
     @mcp.tool(
         title="Session Info",
@@ -193,15 +174,14 @@ def register_kernel_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("session_info")
     async def notebook_session_info(
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Get information about the current notebook session."""
-        session = get_session(ctx, notebook_path)
-        info = await get_session_info_fn(session.kernel)
-        info.update(get_manager(ctx).document_transport_info(session))
-        return info
+        return await NotebookActions(
+            get_manager(ctx), get_session_info_fn=get_session_info_fn
+        ).session_info(notebook_path=notebook_path)
 
     @mcp.tool(
         title="Inspect Object",
@@ -213,6 +193,7 @@ def register_kernel_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("inspect")
     async def notebook_inspect(
         code: str,
         cursor_pos: int,
@@ -220,10 +201,9 @@ def register_kernel_tools(
         notebook_path: str | None = None,
         detail_level: int = 0,
     ) -> dict[str, Any]:
-        """Inspect an object in the kernel at the given cursor position."""
-        session = get_session(ctx, notebook_path)
-        result = await session.kernel.inspect(code, cursor_pos, detail_level=detail_level)
-        return asdict(result)
+        return await NotebookActions(get_manager(ctx)).inspect(
+            code=code, cursor_pos=cursor_pos, notebook_path=notebook_path, detail_level=detail_level
+        )
 
     @mcp.tool(
         title="Code Completion",
@@ -235,16 +215,16 @@ def register_kernel_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("complete")
     async def notebook_complete(
         code: str,
         cursor_pos: int,
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Get tab-completion suggestions for code at the cursor position."""
-        session = get_session(ctx, notebook_path)
-        result = await session.kernel.complete(code, cursor_pos)
-        return asdict(result)
+        return await NotebookActions(get_manager(ctx)).complete(
+            code=code, cursor_pos=cursor_pos, notebook_path=notebook_path
+        )
 
     @mcp.tool(
         title="Check Code Completeness",
@@ -256,15 +236,15 @@ def register_kernel_tools(
             open_world_hint=False,
         ),
     )
+    @shared_action("code_is_complete")
     async def notebook_code_is_complete(
         code: str,
         ctx: Context,
         notebook_path: str | None = None,
     ) -> dict[str, Any]:
-        """Check whether a code fragment is syntactically complete."""
-        session = get_session(ctx, notebook_path)
-        result = await session.kernel.is_complete(code)
-        return asdict(result)
+        return await NotebookActions(get_manager(ctx)).code_is_complete(
+            code=code, notebook_path=notebook_path
+        )
 
     @mcp.tool(
         title="Execution History",

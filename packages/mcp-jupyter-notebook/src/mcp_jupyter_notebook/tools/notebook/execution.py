@@ -6,14 +6,17 @@ from typing import Any
 
 from mcp.types import ToolAnnotations
 
+from agent_jupyter_toolkit.actions import NotebookActions
 from mcp_jupyter_notebook._mcp import Context, FastMCP
 
 from .common import (
     cell_id_map_for_indices,
     code_result,
     enriched_code_result,
+    get_manager,
     get_session,
     run_all_result,
+    shared_action,
 )
 
 
@@ -37,17 +40,17 @@ def register_execution_tools(
             open_world_hint=True,
         ),
     )
+    @shared_action("code_run")
     async def notebook_code_run(
         code: str,
         ctx: Context,
         notebook_path: str | None = None,
         timeout: float = 120.0,
     ) -> dict[str, Any]:
-        """Append a new code cell to the notebook, execute it, and return outputs."""
-        session = get_session(ctx, notebook_path)
         await ctx.info(f"Executing code cell ({len(code)} chars)")
-        result = await invoke_code_cell_fn(session, code, timeout=timeout)
-        return await enriched_code_result(session, result)
+        return await NotebookActions(
+            get_manager(ctx), invoke_code_cell_fn=invoke_code_cell_fn
+        ).code_run(code=code, notebook_path=notebook_path, timeout=timeout)
 
     @mcp.tool(
         title="Re-run Existing Cell",

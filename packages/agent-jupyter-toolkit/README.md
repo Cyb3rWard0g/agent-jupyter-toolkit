@@ -51,6 +51,9 @@ pip install agent-jupyter-toolkit
 # Install optional DataFrame serialization support
 pip install agent-jupyter-toolkit[dataframe]
 
+# Include named actions and exportable input schemas (no MCP dependency)
+pip install "agent-jupyter-toolkit[actions]"
+
 # Include a managed local Python kernel
 pip install agent-jupyter-toolkit[local]
 
@@ -64,6 +67,36 @@ uv pip install agent-jupyter-toolkit
 The `local` extra installs ipykernel, `batch` installs nbclient, and `dataframe`
 installs pandas/Arrow serialization support. The `integration` extra is for
 maintainers running the real Jupyter Server and collaboration tests.
+
+### Named actions without MCP
+
+The optional `actions` extra provides `NotebookActions`, the same implementations
+used by the corresponding notebook MCP tools. An application can inspect action
+descriptions/input schemas and invoke a selected action directly:
+
+```python
+from agent_jupyter_toolkit.actions import NotebookActions
+from agent_jupyter_toolkit.notebook import NotebookWorkspace
+
+async def investigate():
+    async with NotebookWorkspace() as workspace:
+        actions = NotebookActions(workspace)
+        definitions = actions.definitions()
+        await actions.invoke("open", {"notebook_path": "investigation.ipynb"})
+        await actions.invoke("code_run", {"code": "value = 21"})
+        result = await actions.invoke("code_run", {"code": "print(value * 2)"})
+        return result
+```
+
+The explicit action set covers lifecycle, stable-ID document reads/edits, visible
+code/markdown, packages/dependencies, kernel introspection and JSON variables.
+`invoke` rejects unknown actions and validates typed inputs without coercion or
+automatic retries. Named Python methods remain available for direct integrations.
+Calls share the workspace's existing sessions; they do not create a new workspace
+context per action. The embedding application owns authorization, concurrency,
+deadlines and retention. Saved notebooks do not restore live Python variables.
+The action layer does not add dataset export or DataFrame serialization to the
+existing JSON variable getter.
 
 ### Development (monorepo)
 
