@@ -181,6 +181,9 @@ jobs:
   test-server-integration:
     name: Test real Jupyter Server transport
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      JUPYTER_PATH: ${{ github.workspace }}/.venv/share/jupyter
     steps:
       - uses: actions/checkout@v4
 
@@ -194,6 +197,15 @@ jobs:
 
       - name: Install integration dependencies
         run: uv sync --locked --all-packages --all-extras --dev
+
+      - name: Bind the server kernel to the locked environment
+        run: |
+          uv run python -m ipykernel install --sys-prefix --name python3
+          uv run python - <<'PY' >> "$GITHUB_ENV"
+          import sys
+          print(f"JAT_SERVER_PYTHON={sys.executable}")
+          print(f"JAT_SERVER_PREFIX={sys.prefix}")
+          PY
 
       - name: Start isolated Jupyter Server
         run: |
@@ -216,6 +228,7 @@ jobs:
           exit 1
 
       - name: Run server transport tests
+        timeout-minutes: 3
         env:
           JAT_SERVER_URL: http://127.0.0.1:8899
           JAT_SERVER_TOKEN: jat-token
@@ -225,7 +238,7 @@ jobs:
           uv run pytest \
             packages/agent-jupyter-toolkit/tests/test_transport_server_smoke.py \
             packages/agent-jupyter-toolkit/tests/test_collaboration_server_smoke.py \
-            -q
+            -vv -o faulthandler_timeout=30
 
       - name: Stop Jupyter Server
         if: always()
