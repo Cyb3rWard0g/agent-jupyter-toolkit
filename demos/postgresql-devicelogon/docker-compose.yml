@@ -1,6 +1,10 @@
 services:
   jupyter:
-    build: ./jupyter/
+    build:
+      context: ../..
+      dockerfile: packages/mcp-jupyter-notebook/quickstarts/jupyter/Dockerfile
+      args:
+        NOTEBOOK_REQUIREMENTS: demos/postgresql-devicelogon/jupyter/requirements.txt
     container_name: devicelogon-jupyter
     restart: unless-stopped
     init: true

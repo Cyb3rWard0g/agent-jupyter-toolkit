@@ -1,9 +1,10 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+import zmq
 
 from agent_jupyter_toolkit.kernel import (
     KernelInfoResult,
@@ -17,6 +18,7 @@ from agent_jupyter_toolkit.kernel.messages import fold_iopub_events
 from agent_jupyter_toolkit.kernel.transports.local import LocalTransport
 from agent_jupyter_toolkit.kernel.transports.server import ServerTransport
 from agent_jupyter_toolkit.kernel.types import ServerConfig
+from agent_jupyter_toolkit.utils.execution import convert_to_notebook_result
 
 pytestmark = pytest.mark.asyncio
 
@@ -150,8 +152,63 @@ async def test_execution_state_bounds_and_reports_stream_output():
     assert result.dropped_output_bytes == 3
 
 
-async def test_connection_file_attach():
-    sess1 = create_session(SessionConfig(mode="local", kernel_name="python3"))
+@pytest.mark.parametrize("iopub_order", [None, "before", "after"])
+async def test_execute_reply_preserves_error_without_duplicating_iopub(iopub_order):
+    name, value = "UnknownSubshellError", "Unknown subshell_id 'deleted'"
+    reply = {
+        "msg_type": "execute_reply",
+        "content": {"status": "error", "ename": name, "evalue": value, "traceback": []},
+    }
+    traceback = [f"{name}: {value}"] if iopub_order else []
+    iopub = {
+        "msg_type": "error",
+        "content": {"ename": name, "evalue": value, "traceback": traceback},
+    }
+    events = [reply]
+    if iopub_order == "before":
+        events.insert(0, iopub)
+    elif iopub_order == "after":
+        events.append(iopub)
+
+    result = convert_to_notebook_result(fold_iopub_events(events), -1)
+
+    assert result.status == "error"
+    assert result.outputs == [
+        {"output_type": "error", "ename": name, "evalue": value, "traceback": traceback}
+    ]
+    assert result.error_message == f"{name}: {value}"
+    assert result.text_outputs == [result.error_message]
+
+
+async def test_shell_only_error_obeys_the_output_limit():
+    state = ExecutionState(max_output_bytes=0)
+    state.apply(
+        {
+            "msg_type": "execute_reply",
+            "content": {"status": "error", "ename": "ValueError", "evalue": "bad value"},
+        }
+    )
+
+    result = state.result()
+    assert state.snapshot()[0] == result.outputs == []
+    assert result.status == "error"
+    assert result.output_truncated is True
+    assert result.dropped_output_bytes > 0
+    assert state.result().dropped_output_bytes == result.dropped_output_bytes
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "disabled",
+        pytest.param(
+            "required",
+            marks=pytest.mark.skipif(not zmq.has("curve"), reason="libzmq has no Curve support"),
+        ),
+    ],
+)
+async def test_connection_file_attach(policy):
+    sess1 = create_session(SessionConfig(transport_encryption=policy))
     await sess1.start()
     try:
         km = sess1.kernel_manager
@@ -169,8 +226,13 @@ async def test_connection_file_attach():
         await sess2.start()  # Attachment startup is also idempotent.
         try:
             assert await sess2.is_alive()
-            res = await sess2.execute("x = 10\nx")
+            assert sess2.session_info().encryption_enabled is (policy == "required")
+            assert not sess2.session_info().owns_kernel
+            # The borrower receives IOPub broadcasts from the owner too.
+            await sess1.execute("print('owner-only')", timeout=10)
+            res = await sess2.execute("print('borrower-only')\nx = 10", timeout=10)
             assert res.status == "ok"
+            assert res.stdout == "borrower-only\n"
         finally:
             await sess2.shutdown()
         still_running = await sess1.execute("x + 1")
@@ -346,6 +408,31 @@ async def test_local_control_request_does_not_wait_for_shell_request_lock():
     client.control_channel.send.assert_called_once_with(message)
 
 
+async def test_new_server_notebook_session_has_a_name_for_jupyterlab():
+    transport = ServerTransport(ServerConfig(base_url="http://unused"))
+    model = {
+        "path": "shared/investigation.ipynb",
+        "name": "investigation.ipynb",
+        "type": "notebook",
+        "kernel": {"name": "python3", "id": "kernel-1"},
+    }
+    reply = SimpleNamespace(raise_for_status=Mock(), json=AsyncMock(return_value=model))
+    post = MagicMock()
+    post.return_value.__aenter__.return_value = reply
+    transport._session = SimpleNamespace(post=post)
+
+    assert await transport._create_session_for_path(model["path"], "python3") == model
+    post.assert_called_once_with(
+        "http://unused/api/sessions",
+        json={
+            "path": "shared/investigation.ipynb",
+            "name": "investigation.ipynb",
+            "type": "notebook",
+            "kernel": {"name": "python3"},
+        },
+    )
+
+
 async def test_server_routes_control_reply_while_execution_lock_is_held():
     transport = ServerTransport(ServerConfig(base_url="http://unused"))
     transport._session = SimpleNamespace()
@@ -407,10 +494,11 @@ async def test_server_unregisters_execution_before_waiting_for_final_callback(
         callback_started.set()
         await release_callback.wait()
 
-    execution = asyncio.create_task(transport.execute("pass", output_callback=callback))
+    execution = asyncio.create_task(transport.execute("", output_callback=callback))
     debug = None
     try:
         execute_request = await asyncio.wait_for(sent_requests.get(), 1)
+        assert execute_request["content"]["code"] == ""
         request_id = execute_request["header"]["msg_id"]
         for msg_type, content in (
             ("execute_reply", {"status": "ok"}),

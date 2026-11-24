@@ -15,7 +15,8 @@ ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python -m pip install --upgrade pip wheel setuptools && pip --version
 
-RUN pip install --no-cache-dir .
+ARG MCP_INSTALL_EXTRAS
+RUN pip install --no-cache-dir ".${MCP_INSTALL_EXTRAS:+[$MCP_INSTALL_EXTRAS]}"
 
 EXPOSE 4040
 

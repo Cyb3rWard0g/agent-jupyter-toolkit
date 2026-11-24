@@ -42,6 +42,9 @@ Microsoft Defender for real security operations.
 The CSV is automatically loaded into PostgreSQL on first `docker compose up` —
 no manual ingestion step needed.
 
+The Jupyter image uses the toolkit's shared Dockerfile and the Jupyter runtime
+versions in `uv.lock`.
+
 ```bash
 # 1. Copy env and adjust if needed
 cp .env.example .env

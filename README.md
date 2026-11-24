@@ -39,6 +39,9 @@ pip install agent-jupyter-toolkit[dataframe]
 # Or install the MCP server (includes the toolkit as a dependency)
 pip install mcp-jupyter-notebook
 
+# MCP server + managed local Python kernel
+pip install "mcp-jupyter-notebook[local]"
+
 # MCP server + toolkit DataFrame serialization support
 pip install mcp-jupyter-notebook[dataframe]
 ```
@@ -62,6 +65,9 @@ asyncio.run(main())
 ```bash
 # stdio transport (for VS Code, Cursor, Claude Desktop)
 mcp-jupyter-notebook --mode local --kernel-name python3
+
+# Require CurveZMQ encryption on local kernel channels
+mcp-jupyter-notebook --mode local --transport-encryption required
 
 # Connect to a remote Jupyter server
 mcp-jupyter-notebook --mode server --base-url http://localhost:8888 --token my-token

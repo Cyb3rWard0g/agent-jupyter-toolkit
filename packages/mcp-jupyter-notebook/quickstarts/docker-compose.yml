@@ -1,6 +1,8 @@
 services:
   jupyter:
-    build: ./jupyter/
+    build:
+      context: ../../..
+      dockerfile: packages/mcp-jupyter-notebook/quickstarts/jupyter/Dockerfile
     container_name: mcp-jupyter-server
     restart: unless-stopped
     init: true

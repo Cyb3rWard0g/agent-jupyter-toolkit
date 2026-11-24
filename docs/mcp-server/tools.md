@@ -1,6 +1,6 @@
 # Tools Reference
 
-The MCP Jupyter Notebook server exposes **43 core notebook tools** organized into eight categories, plus **8 optional PostgreSQL tools** and **3 optional Azure Monitor Logs tools** for notebook-native data workflows. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
+The MCP Jupyter Notebook server exposes **43 core notebook tools** and optional tools for **saved datasets**, **PostgreSQL**, and **Azure Monitor Logs**. All tools are registered via `@mcp.tool()` with `ToolAnnotations` and accessible through any MCP client.
 
 > **Multi-notebook support:** Tools operating on a session accept an optional `notebook_path`. When omitted, they target the manager's default notebook. Lifecycle tools such as opening and closing require an explicit path.
 
@@ -532,7 +532,10 @@ selected notebook transport, collaboration mode, and fallback reason.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
-| *(none)* | — | — | — | — |
+| `notebook_path` | `str` | No | Default notebook | Open notebook to inspect |
+
+For local kernels, `transport_encryption` reports the launch policy and
+`encryption_enabled` reports active CurveZMQ encryption.
 
 **Returns:** Session metadata dict
 
@@ -701,6 +704,60 @@ Set a variable in the kernel's global scope, making it available for subsequent 
 **Returns:** `ok`, `name`
 
 **Example prompt:** *"Set `threshold` to 0.95 in the kernel"*
+
+---
+
+### `notebook_import_table`
+
+Import JSON rows into a pandas DataFrame in an open Python notebook. The target
+kernel must have pandas installed.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `notebook_path` | string | Explicit path of the open notebook |
+| `operation_id` | string | Caller-assigned ID for this logical import |
+| `name` | string | New DataFrame variable name, an ASCII Python identifier |
+| `columns` | array of strings | Unique column names in row order |
+| `rows` | array of arrays | One JSON value per column in each row |
+| `metadata` | object, optional | Provenance stored in `DataFrame.attrs["notebook_import"]` |
+
+The receipt contains `operation_id`, `table`, `row_count`, and `column_count`.
+The DataFrame and its receipt live in the kernel. Follow-up notebook tools can
+use the DataFrame to produce summaries, charts, or other outputs. Retry with
+the same operation ID and request in the same notebook and live kernel to
+recover that receipt. Changed requests and writes
+over existing variables are rejected. If the original table has been replaced
+or removed, the retry reports `table_unavailable`. Restarting the kernel clears
+its tables and receipts. The payload limit is 512 KiB of encoded JSON.
+
+---
+
+## Saved Notebook Datasets (optional)
+
+Set [a shared dataset root](configuration.md#saved-notebook-datasets) to enable
+these tools. Call them with the explicit `notebook_path` of an open notebook.
+
+| Tool | Inputs besides `notebook_path` | Receipt |
+|---|---|---|
+| `notebook_dataset_begin` | `operation_id`, `name`, ordered `columns`, expected `row_count`, optional `metadata` | `dataset_id`, `max_batch_bytes`, `max_batches` |
+| `notebook_dataset_append` | `dataset_id`, zero-based `index`, `rows` in column order | `dataset_id`, `index`, `rows_written` |
+| `notebook_dataset_commit` | `dataset_id`, `batch_count` | `dataset_id`, `loader_cell_id`, `operation_id`, `table`, `row_count`, `column_count`, and `query_cell_id` when query Markdown is saved |
+
+Append sequential batches of strings or nulls. The server accepts up to 128
+batches of 512 KiB each, 256 columns, and 10,000 rows per capture. For a
+zero-row result, commit with `batch_count=0`. Identical retries reuse the
+same capture and loader cell. Conflicting writes to a capture return an error.
+Commit checks the expected row count and publishes one Parquet file before it
+adds and runs the loader cell. The cell reads the Parquet file into pandas
+and displays up to five rows with `head(5)`. The notebook saves this
+preview as cell output. If the metadata includes a query, the notebook records
+it in a Markdown cell above the loader. A retry can finish loading a published
+capture if the kernel or notebook save failed.
+
+Use the DataFrame for later code cells. To replay the notebook with a clean
+kernel, call `notebook_restart_and_run_all` or use JupyterLab's **Restart Kernel
+and Run All Cells**. The loader restores the saved rows and import metadata
+without contacting the original source.
 
 ---
 

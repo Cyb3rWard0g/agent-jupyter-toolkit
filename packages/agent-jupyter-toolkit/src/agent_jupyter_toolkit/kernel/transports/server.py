@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from posixpath import basename
 
 import aiohttp
 
@@ -408,9 +409,8 @@ class ServerTransport(KernelTransport):
             request_id = req["header"]["msg_id"]
             request_queue = self._register_request(request_id)
 
-            preview = (code or "").splitlines()[0][:120]
             logger.info(
-                "execute(request_id=%s, timeout=%s) code=%r ...", request_id, timeout, preview
+                "execute(request_id=%s, timeout=%s, code_length=%d)", request_id, timeout, len(code)
             )
 
             # Trigger pre-execution hooks for instrumentation/logging
@@ -882,7 +882,12 @@ class ServerTransport(KernelTransport):
         assert self._session is not None
         async with self._session.post(
             f"{self._base}/api/sessions",
-            json={"path": path, "type": "notebook", "kernel": {"name": kernel_name}},
+            json={
+                "path": path,
+                "type": "notebook",
+                "name": basename(path),
+                "kernel": {"name": kernel_name},
+            },
         ) as r:
             r.raise_for_status()
             sess = await r.json()

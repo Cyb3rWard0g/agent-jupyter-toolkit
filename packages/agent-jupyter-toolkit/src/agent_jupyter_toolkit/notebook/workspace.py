@@ -8,7 +8,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..kernel.types import validate_transport_encryption
 from ._workspace_files import create_workspace_file_backend
+from .datasets import NotebookDatasets
 
 if TYPE_CHECKING:
     from .session import NotebookSession
@@ -31,10 +33,16 @@ class NotebookWorkspaceConfig:
     headers: dict[str, str] | None = field(default=None, repr=False)
     prefer_collab: bool = True
     collaboration_mode: str | None = None
+    transport_encryption: str = "disabled"
+    dataset_root: str | Path | None = None
+    kernel_dataset_root: str | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"local", "server"}:
             raise ValueError("Workspace mode must be 'local' or 'server'")
+        validate_transport_encryption(self.transport_encryption, local=self.mode == "local")
+        if self.kernel_dataset_root is not None and self.dataset_root is None:
+            raise ValueError("kernel_dataset_root requires dataset_root")
 
 
 class NotebookWorkspace:
@@ -55,6 +63,11 @@ class NotebookWorkspace:
     ) -> None:
         config = config or NotebookWorkspaceConfig()
         self._config = replace(config, headers=dict(config.headers or {}))
+        self.datasets = (
+            NotebookDatasets(config.dataset_root, config.kernel_dataset_root)
+            if config.dataset_root is not None
+            else None
+        )
         self._sessions: dict[str, NotebookSession] = {}
         self._opening: dict[str, asyncio.Task[NotebookSession]] = {}
         self._closing: dict[str, asyncio.Task[None]] = {}
@@ -506,7 +519,9 @@ class NotebookWorkspace:
             return NotebookSession(kernel=kernel, doc=doc)
 
         # local mode
-        kernel = create_kernel("local", kernel_name=kernel_name)
+        kernel = create_kernel(
+            "local", kernel_name=kernel_name, transport_encryption=cfg.transport_encryption
+        )
         doc = create_notebook_transport(
             "local",
             notebook_path,

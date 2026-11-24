@@ -42,6 +42,7 @@ def create_kernel(
         kernel_name: Kernel type (default: "python3")
         connection_file: For local mode, existing connection file
         packer: Optional serializer name for jupyter_client.Session
+        transport_encryption: CurveZMQ policy for local kernel launches
         base_url: For remote mode, Jupyter server URL
         token: For remote mode, API token
         notebook_path: For remote mode, bind to specific notebook
@@ -86,6 +87,7 @@ def create_kernel(
         return create_session(
             SessionConfig(
                 mode="server",
+                transport_encryption=transport_encryption,
                 server=ServerConfig(
                     base_url=base_url,
                     token=token,

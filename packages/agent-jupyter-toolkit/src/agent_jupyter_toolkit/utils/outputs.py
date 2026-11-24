@@ -46,12 +46,7 @@ def extract_outputs(outputs: list[dict[str, Any]]) -> list[str]:
                 extracted.append(str(text))
 
         elif output_type == "error":
-            # Error tracebacks
-            traceback = output.get("traceback", [])
-            if isinstance(traceback, list):
-                extracted.append("\n".join(traceback))
-            else:
-                extracted.append(str(traceback))
+            extracted.append(_error_text(output))
 
     return extracted
 
@@ -100,9 +95,7 @@ def format_output(
                 extracted.append(f"{prefix}{content}")
 
         elif output_type == "error":
-            traceback = output.get("traceback", [])
-            content = "\n".join(traceback) if isinstance(traceback, list) else str(traceback)
-            extracted.append(f"{prefix}{content}")
+            extracted.append(f"{prefix}{_error_text(output)}")
 
     result = "\n".join(extracted)
 
@@ -111,6 +104,14 @@ def format_output(
         result = result[: max_length - 3] + "..."
 
     return result
+
+
+def _error_text(output: dict[str, Any]) -> str:
+    traceback = output.get("traceback")
+    if traceback:
+        return "\n".join(traceback) if isinstance(traceback, list) else str(traceback)
+    name, value = output.get("ename"), output.get("evalue")
+    return ": ".join(str(part) for part in (name, value) if part)
 
 
 def get_result_value(outputs: list[dict[str, Any]]) -> Any:

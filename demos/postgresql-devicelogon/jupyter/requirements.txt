@@ -1,5 +1,4 @@
-# Kernel-side dependencies for the Jupyter image.
-jupyter-collaboration>=5.0.0
+# Device logon kernel extras. The shared Dockerfile installs Jupyter from uv.lock.
 
 ipywidgets
 pandas

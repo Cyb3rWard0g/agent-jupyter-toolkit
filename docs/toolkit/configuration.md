@@ -31,6 +31,13 @@ file raises `FileNotFoundError` and never launches a replacement kernel. `cwd`,
 `env`, `kernel_args`, and `transport_encryption` are launch-only options and are
 rejected in attachment mode.
 
+`transport_encryption="required"` requires a Curve-capable libzmq and a
+kernelspec that declares `curve` in `metadata.supported_encryption`. `auto`
+allows a fallback for kernelspecs without that declaration when libzmq supports
+Curve. Check `session.session_info().encryption_enabled` for the active state.
+For connections to Jupyter Server, use an HTTPS `base_url` to encrypt HTTP and
+WebSocket traffic.
+
 ### `ServerConfig`
 
 | Field | Type | Default | Description |
@@ -65,6 +72,16 @@ config = SessionConfig(
     ),
 )
 ```
+
+## Saved Notebook Datasets
+
+Install `agent-jupyter-toolkit[dataframe]` and configure
+`NotebookWorkspaceConfig(dataset_root=...)` to enable `workspace.datasets`.
+Call its `begin`, `append`, and `commit` methods with an open `NotebookSession`.
+The workspace uses `kernel_dataset_root` if the Python kernel mounts the same
+persistent storage at a different absolute path. The kernel needs pandas and
+PyArrow to run the saved loader cell. See the [storage configuration and replay
+requirements](../mcp-server/configuration.md#saved-notebook-datasets).
 
 ## Notebook Environment Variables
 

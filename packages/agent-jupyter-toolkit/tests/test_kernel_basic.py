@@ -1,4 +1,5 @@
 import pytest
+from packaging.version import Version
 
 from agent_jupyter_toolkit.kernel import SessionConfig, create_session
 from agent_jupyter_toolkit.utils.packages import check_package_availability
@@ -30,6 +31,26 @@ async def test_kernel_subshell_lifecycle_and_execution():
         result = await sess.execute("print('from subshell')", subshell_id=subshell_id)
         assert result.status == "ok"
         assert result.stdout == "from subshell\n"
+
+        deleted_id = subshell_id
+        await sess.delete_subshell(deleted_id)
+        subshell_id = None
+        assert deleted_id not in await sess.list_subshells()
+
+        if info.implementation == "ipython":
+            # kernel_info reports the IPython version. The error reply for an
+            # unknown subshell was introduced in ipykernel 7.4.
+            kernel_version = await sess.execute(
+                "import ipykernel\nprint(ipykernel.__version__)", timeout=5, store_history=False
+            )
+            assert kernel_version.status == "ok", kernel_version.stderr
+            if Version(kernel_version.stdout.strip()) >= Version("7.4"):
+                rejected = await sess.execute("pass", subshell_id=deleted_id, timeout=5)
+                assert rejected.status == "error"
+                assert not rejected.timed_out
+                assert any(out.get("ename") == "UnknownSubshellError" for out in rejected.outputs)
+
+        assert (await sess.execute("21 * 2", timeout=5)).status == "ok"
     finally:
         if subshell_id is not None:
             await sess.delete_subshell(subshell_id)

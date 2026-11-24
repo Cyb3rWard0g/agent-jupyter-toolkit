@@ -135,6 +135,7 @@ class NotebookSession:
         timeout: float | None = None,
         *,
         cell_id: str | None = None,
+        execution_code: str | None = None,
     ) -> ExecutionResult:
         """
         Execute code with real-time output streaming to the document.
@@ -143,7 +144,8 @@ class NotebookSession:
         append_and_run and run_at methods.
 
         Args:
-            code: Source code to execute
+            code: Source recorded in the notebook
+            execution_code: Optional guarded code for a toolkit-managed execution
             cell_index: Index of the cell being executed
             timeout: Optional execution timeout
 
@@ -199,7 +201,7 @@ class NotebookSession:
         disconnected: KernelDisconnectedError | None = None
         try:
             res = await self.kernel.execute(
-                code,
+                execution_code if execution_code is not None else code,
                 timeout=timeout,
                 output_callback=_persist,
                 metadata={

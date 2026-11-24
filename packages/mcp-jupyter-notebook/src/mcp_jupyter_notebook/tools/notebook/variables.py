@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from mcp.types import ToolAnnotations
+from pydantic import JsonValue
 
 from agent_jupyter_toolkit.actions import NotebookActions
 from mcp_jupyter_notebook._mcp import Context, FastMCP
@@ -81,3 +82,32 @@ def register_variable_tools(
         return await NotebookActions(
             get_manager(ctx), variable_manager_cls=variable_manager_cls
         ).variable_set(name=name, value=value, notebook_path=notebook_path)
+
+    @mcp.tool(
+        title="Import Table",
+        annotations=ToolAnnotations(
+            title="Import Table",
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+    )
+    @shared_action("import_table")
+    async def notebook_import_table(
+        notebook_path: str,
+        operation_id: str,
+        name: str,
+        columns: list[str],
+        rows: list[list[JsonValue]],
+        ctx: Context,
+        metadata: dict[str, JsonValue] | None = None,
+    ) -> dict[str, Any]:
+        return await NotebookActions(get_manager(ctx)).import_table(
+            notebook_path=notebook_path,
+            operation_id=operation_id,
+            name=name,
+            columns=columns,
+            rows=rows,
+            metadata=metadata,
+        )

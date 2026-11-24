@@ -45,11 +45,12 @@ batch = [
   "nbclient>=0.11.0",
 ]
 integration = [
-  "jupyter-server>=2.21.0",
-  "jupyter-collaboration>=5.0.0",
+  "jupyter-server>=2.21.1",
+  "jupyter-collaboration>=5.0.4",
   "ipykernel>=7.3.0",
 ]
 dataframe = [
+  "filelock>=3.32.0",
   "pandas>=3.0.1",
   "pyarrow>=23.0.1",
 ]

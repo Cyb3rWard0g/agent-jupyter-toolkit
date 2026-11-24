@@ -8,6 +8,7 @@ pgdata/
 packages/agent-jupyter-toolkit/quickstarts/output/
 packages/agent-jupyter-toolkit/quickstarts/demo.ipynb
 packages/mcp-jupyter-notebook/quickstarts/jupyter/notebooks/*.ipynb
+packages/mcp-jupyter-notebook/quickstarts/jupyter/notebooks/datasets/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

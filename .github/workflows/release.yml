@@ -6,8 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write       # for creating GitHub Releases
-  id-token: write       # for PyPI trusted publishing (OIDC)
+  contents: read
 
 jobs:
   # ── Build both packages ──────────────────────────────
@@ -115,14 +114,15 @@ jobs:
       - name: Install built wheels together
         run: python -m pip install dist/toolkit/*.whl dist/mcp/*.whl
 
-      - name: Verify Azure Monitor extra and actual kernel against installed wheels
+      - name: Verify Azure Monitor and local kernel extras against installed wheels
         run: |
           for wheel in dist/mcp/*.whl; do
-            python -m pip install "$wheel[azure-monitor]" pytest pytest-asyncio ipykernel
+            python -m pip install "$wheel[azure-monitor,local]" pytest pytest-asyncio
           done
           python -c 'from agent_data_toolkit.azure_monitor import AzureMonitorLogsClient'
           python -m pytest \
             packages/mcp-jupyter-notebook/tests/integration/test_azure_monitor_kernel.py \
+            packages/mcp-jupyter-notebook/tests/integration/test_notebook_mcp.py::test_local_mcp_keeps_required_encryption_after_restart \
             -q --import-mode=importlib -o pythonpath=
 
       - name: Verify versions and workspace imports
@@ -143,11 +143,16 @@ jobs:
           assert SessionManager.__name__ == "SessionManager"
           PY
 
+  test-server-integration:
+    uses: ./.github/workflows/server-integration.yml
+
   # ── Publish agent-jupyter-toolkit to PyPI ────────────
   publish-toolkit:
     name: Publish agent-jupyter-toolkit
-    needs: [build, test, verify-artifacts]
+    needs: [build, test, verify-artifacts, test-server-integration]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     environment:
       name: pypi
       url: https://pypi.org/project/agent-jupyter-toolkit/
@@ -170,6 +175,8 @@ jobs:
     name: Publish mcp-jupyter-notebook
     needs: [build, test, publish-toolkit]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     environment:
       name: pypi
       url: https://pypi.org/project/mcp-jupyter-notebook/
@@ -215,6 +222,8 @@ jobs:
     name: GitHub Release
     needs: [publish-toolkit, publish-mcp]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:

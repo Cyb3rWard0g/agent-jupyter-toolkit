@@ -449,9 +449,12 @@ close managed sessions.
 
 `NotebookWorkspaceConfig` accepts `mode` (`"local"` or `"server"`), `kernel_name`
 (`"python3"`), `base_url`, `token`, `headers`, `prefer_collab` (`True`), and
-`collaboration_mode` (`None`, or `"required"`, `"preferred"`, `"disabled"`). Server
-mode requires a Jupyter `base_url` when opening, listing files, or deleting files.
-These settings describe the Jupyter backend, independently of any MCP transport.
+`collaboration_mode` (`None`, or `"required"`, `"preferred"`, `"disabled"`). Use
+`transport_encryption` (`"disabled"`, `"auto"`, or `"required"`) to set the
+[CurveZMQ policy](configuration.md#kernel-configuration) for local kernel
+launches. Server mode requires a Jupyter `base_url` when opening, listing files,
+or deleting files. These settings describe the Jupyter backend, independently
+of any MCP transport.
 
 | Operation | Behavior |
 |---|---|

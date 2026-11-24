@@ -93,8 +93,8 @@ class LocalTransport(KernelTransport):
             cwd is not None or env is not None or kernel_args or transport_encryption != "disabled"
         ):
             raise ValueError(
-                "cwd, env, kernel_args, and transport_encryption apply only when "
-                "launching a new kernel"
+                "cwd, env, kernel_args, and transport_encryption only apply when "
+                "launching a local kernel"
             )
 
         # Initialize kernel manager with configuration

@@ -1,9 +1,7 @@
-# Kernel-side dependencies for the Jupyter quickstart image.
-# These are installed into the same Python environment used by notebook kernels.
-
-jupyter-collaboration>=5.0.0
+# Quickstart kernel extras. The shared Dockerfile installs Jupyter from uv.lock.
 
 pandas
+pyarrow
 matplotlib
 networkx
 

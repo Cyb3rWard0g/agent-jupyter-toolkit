@@ -489,6 +489,40 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
             value = metadata.to_py() if hasattr(metadata, "to_py") else metadata
             return self._overlay_metadata_maps(value or {})
 
+    async def wait_until_persisted(
+        self, *, metadata: dict[str, Any] | None = None, cell_id: str | None = None
+    ) -> None:
+        """Confirm selected collaborative changes reached the stored notebook.
+
+        The collaboration server debounces autosaves. Send its manual-save
+        request and verify the specific changes through the read-only Contents
+        API. A save can race the preceding sync update on the server.
+        """
+        # Jupyter Server YDoc uses a RAW frame for manual save. The Contents
+        # response confirms storage even when a save reply reports success early.
+        encoder = pycrdt.Encoder()
+        encoder.write_var_uint(2)
+        encoder.write_var_string("save")
+        encoder.write_var_uint(0)
+        request = encoder.to_bytes()
+        url = f"{self._base}/api/contents/{quote(self._path)}"
+
+        async with asyncio.timeout(10):
+            while True:
+                if not self._http or not self._ws or self._ws.closed:
+                    raise RuntimeError("Cannot save a disconnected collaborative notebook")
+                async with self._http.get(url) as response:
+                    response.raise_for_status()
+                    contents = (await response.json())["content"]
+                file_metadata = contents.get("metadata", {})
+                cells = contents.get("cells", [])
+                if all(
+                    file_metadata.get(key) == value for key, value in (metadata or {}).items()
+                ) and (cell_id is None or any(cell.get("id") == cell_id for cell in cells)):
+                    return
+                await self._ws.send_bytes(request)
+                await asyncio.sleep(0.2)
+
     async def update_metadata(self, updates: dict[str, Any]) -> None:
         """Shallow-merge notebook metadata as individual shared-map updates."""
         if not isinstance(updates, dict):
@@ -1444,7 +1478,9 @@ class CollabYjsDocumentTransport(NotebookDocumentTransport):
                     if applied_ok:
                         decode_failures = 0
                         backoff = 0.0
-                        if not self._initial_sync_done.is_set():
+                        # STEP1 only exchanges state vectors. Wait for the
+                        # STEP2 snapshot before reading persisted metadata.
+                        if kind == "sync:1" and not self._initial_sync_done.is_set():
                             self._initial_sync_done.set()
                             wslog.debug("Initial Yjs state applied; sync barrier set")
 

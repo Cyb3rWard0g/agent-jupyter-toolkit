@@ -13,6 +13,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 ## Features
 
 - **Rich MCP tool surface** — notebook lifecycle, code execution, markdown, stable cell-ID operations, packages, kernel control, introspection, variables
+- **Optional saved datasets** — capture supplied rows in Parquet and reload them in a notebook. [Configuration](../../docs/mcp-server/configuration.md#saved-notebook-datasets)
 - **Optional PostgreSQL tools** — enable on demand to create a DB client/connection in the kernel
 - **Optional Azure Monitor Logs / Sentinel tools** — visible KQL query cells, reusable kernel clients and retained DataFrames; [setup and result semantics](../../docs/mcp-server/azure-monitor.md)
 - **Real-time sync** — Yjs collaboration transport shows cell edits instantly in JupyterLab
@@ -205,6 +206,7 @@ All settings can be passed as **CLI arguments** or **environment variables**. CL
 | `MCP_JUPYTER_BASE_URL` | `--base-url` | Jupyter server URL | — |
 | `MCP_JUPYTER_TOKEN` | `--token` | Jupyter API token | — |
 | `MCP_JUPYTER_KERNEL_NAME` | `--kernel-name` | Kernel spec name | `python3` |
+| `MCP_JUPYTER_TRANSPORT_ENCRYPTION` | `--transport-encryption` | Local kernel CurveZMQ policy (`disabled`, `auto`, or `required`) | `disabled` |
 | `MCP_JUPYTER_NOTEBOOK_PATH` | `--notebook-path` | Notebook file path (`.ipynb`) | auto-generated |
 | `MCP_JUPYTER_TRANSPORT` | `--transport` | `stdio`, `sse`, `streamable-http` | `stdio` |
 | `MCP_JUPYTER_HOST` | `--host` | Host for HTTP transports | `127.0.0.1` |

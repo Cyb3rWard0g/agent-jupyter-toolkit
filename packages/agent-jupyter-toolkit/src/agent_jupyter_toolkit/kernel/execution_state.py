@@ -17,6 +17,8 @@ class ExecutionState:
         self.execution_count: int | None = None
         self.status = "ok"
         self.user_expressions: dict[str, Any] | None = None
+        self._received_iopub_error = False
+        self._reply_error: dict[str, Any] | None = None
         self._pending_clear = False
         self._display_indices: dict[str, set[int]] = {}
         self._stream_chunks: dict[int, list[str]] = {}
@@ -114,17 +116,19 @@ class ExecutionState:
         if msg_type == "error":
             self._clear_if_pending()
             self.status = "error"
-            output = {
-                "output_type": "error",
-                "ename": content.get("ename"),
-                "evalue": content.get("evalue"),
-                "traceback": deepcopy(content.get("traceback") or []),
-            }
+            self._received_iopub_error = True
+            output = self._error_output(content)
             if self._reserve_output(output):
                 self.outputs.append(output)
             return True
         if msg_type == "execute_reply":
             self.status = content.get("status", self.status)
+            if (
+                self.status == "error"
+                and isinstance(content.get("ename"), str)
+                and isinstance(content.get("evalue"), str)
+            ):
+                self._reply_error = self._error_output(content)
             count = content.get("execution_count")
             if count is not None:
                 self.execution_count = count
@@ -136,11 +140,12 @@ class ExecutionState:
 
     def snapshot(self) -> tuple[list[dict[str, Any]], int | None]:
         """Return an isolated visible-output snapshot for callbacks."""
-        return self._materialized_outputs(), self.execution_count
+        outputs, _ = self._materialized_outputs()
+        return outputs, self.execution_count
 
     def result(self) -> ExecutionResult:
         """Build the public result from the current state."""
-        outputs = self._materialized_outputs()
+        outputs, dropped_reply_bytes = self._materialized_outputs()
         stdout = "".join(
             output.get("text", "")
             for output in outputs
@@ -158,8 +163,8 @@ class ExecutionState:
             stderr=stderr,
             outputs=outputs,
             user_expressions=deepcopy(self.user_expressions),
-            output_truncated=self.output_truncated,
-            dropped_output_bytes=self.dropped_output_bytes,
+            output_truncated=self.output_truncated or dropped_reply_bytes > 0,
+            dropped_output_bytes=self.dropped_output_bytes + dropped_reply_bytes,
             display_ids={
                 display_id: sorted(indices) for display_id, indices in self._display_indices.items()
             },
@@ -214,9 +219,26 @@ class ExecutionState:
     def _measure(output: dict[str, Any]) -> int:
         return len(json.dumps(output, default=str, ensure_ascii=False).encode("utf-8"))
 
-    def _materialized_outputs(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _error_output(content: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "output_type": "error",
+            "ename": content.get("ename"),
+            "evalue": content.get("evalue"),
+            "traceback": deepcopy(content.get("traceback") or []),
+        }
+
+    def _materialized_outputs(self) -> tuple[list[dict[str, Any]], int]:
         outputs = deepcopy(self.outputs)
         for index, chunks in self._stream_chunks.items():
             if index < len(outputs):
                 outputs[index]["text"] = "".join(chunks)
-        return outputs
+        # Shell and IOPub frames can arrive in either order. Prefer the IOPub
+        # error when the kernel sends both, including when it was truncated.
+        if self._reply_error is not None and not self._received_iopub_error:
+            size = self._measure(self._reply_error)
+            limit = self.max_output_bytes
+            if limit is not None and self._output_bytes + size > limit:
+                return outputs, size
+            outputs.append(deepcopy(self._reply_error))
+        return outputs, 0

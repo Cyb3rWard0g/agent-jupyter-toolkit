@@ -33,7 +33,7 @@ def test_create_server_registers_postgresql_tools_when_enabled(monkeypatch):
     """Optional tools are only registered when enabled in config."""
     import mcp_jupyter_notebook.server as server
 
-    server._server_config = {"enabled_tools": ["postgresql"]}
+    monkeypatch.setattr(server, "_server_config", {"enabled_tools": ["postgresql"]})
     mcp = server.create_server()
 
     assert isinstance(mcp, FastMCP)
@@ -46,6 +46,8 @@ def test_create_server_registers_postgresql_tools_when_enabled(monkeypatch):
     assert "postgresql_schema_list_columns" in tool_names
     assert "postgresql_schema_tree" in tool_names
     assert "postgresql_reset" in tool_names
+    assert "notebook_import_table" in tool_names
+    assert all(not name.startswith("notebook_dataset_") for name in tool_names)
 
 
 def test_parse_headers_env_valid(monkeypatch):
@@ -93,6 +95,34 @@ def test_unknown_collaboration_mode_is_rejected(monkeypatch):
     monkeypatch.setenv("MCP_JUPYTER_COLLABORATION_MODE", "sometimes")
     with pytest.raises(ValueError, match="collaboration mode"):
         process_config(_config_args())
+
+
+def test_transport_encryption_config_precedence(monkeypatch):
+    monkeypatch.delenv("MCP_JUPYTER_TRANSPORT_ENCRYPTION", raising=False)
+    assert process_config(_config_args(mode="local"))["transport_encryption"] == "disabled"
+
+    monkeypatch.setenv("MCP_JUPYTER_TRANSPORT_ENCRYPTION", " Auto ")
+    assert process_config(_config_args(mode="local"))["transport_encryption"] == "auto"
+    args = _config_args(mode="local", transport_encryption="required")
+    assert process_config(args)["transport_encryption"] == "required"
+
+
+def test_dataset_root_config_precedence(monkeypatch):
+    monkeypatch.setenv("MCP_JUPYTER_DATASET_ROOT", "/srv/jupyter/datasets")
+    monkeypatch.setenv("MCP_JUPYTER_KERNEL_DATASET_ROOT", "/work/datasets")
+    config = process_config(_config_args(dataset_root="/data/datasets"))
+    assert config["dataset_root"] == "/data/datasets"
+    assert config["kernel_dataset_root"] == "/work/datasets"
+
+
+@pytest.mark.parametrize(
+    ("mode", "policy", "message"),
+    [("local", "unknown", "must be"), ("server", "required", "local kernel")],
+)
+def test_transport_encryption_config_rejects_invalid_settings(monkeypatch, mode, policy, message):
+    monkeypatch.setenv("MCP_JUPYTER_TRANSPORT_ENCRYPTION", policy)
+    with pytest.raises(ValueError, match=f"transport_encryption.*{message}"):
+        process_config(_config_args(mode=mode))
 
 
 @pytest.mark.asyncio
