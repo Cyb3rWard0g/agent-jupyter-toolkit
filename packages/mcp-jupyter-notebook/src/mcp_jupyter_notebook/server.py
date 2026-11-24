@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from agent_jupyter_toolkit.kernel.types import validate_transport_encryption
 from mcp_jupyter_notebook._mcp import FastMCP, run_http_server
 from mcp_jupyter_notebook.context import AppContext, SessionManager
 from mcp_jupyter_notebook.tools import register_notebook_tools
@@ -114,12 +115,26 @@ def process_config(args: Any) -> dict[str, Any]:
         else os.getenv("MCP_JUPYTER_KERNEL_NAME", "python3")
     )
 
+    encryption = getattr(args, "transport_encryption", None)
+    if encryption is None:
+        encryption = os.getenv("MCP_JUPYTER_TRANSPORT_ENCRYPTION", "disabled").strip().lower()
+    validate_transport_encryption(encryption, local=cfg["mode"] == "local")
+    cfg["transport_encryption"] = encryption
+
     # Notebook path
     cfg["notebook_path"] = (
         args.notebook_path
         if args.notebook_path is not None
         else os.getenv("MCP_JUPYTER_NOTEBOOK_PATH")
     ) or f"mcp_{uuid.uuid4().hex[:8]}.ipynb"
+    cfg["dataset_root"] = (
+        getattr(args, "dataset_root", None) or os.getenv("MCP_JUPYTER_DATASET_ROOT") or None
+    )
+    cfg["kernel_dataset_root"] = (
+        getattr(args, "kernel_dataset_root", None)
+        or os.getenv("MCP_JUPYTER_KERNEL_DATASET_ROOT")
+        or None
+    )
 
     # Transport
     cfg["transport"] = (
@@ -235,6 +250,10 @@ def create_server() -> FastMCP:
         lifespan=app_lifespan,
     )
     register_notebook_tools(mcp)
+    if _server_config.get("dataset_root"):
+        from .tools.notebook.datasets import register_dataset_tools
+
+        register_dataset_tools(mcp)
 
     # Optional tools are enabled via CLI/env and registered at startup.
     enabled_tools = _server_config.get("enabled_tools", [])

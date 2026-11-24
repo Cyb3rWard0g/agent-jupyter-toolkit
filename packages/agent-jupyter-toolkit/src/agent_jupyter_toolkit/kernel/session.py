@@ -23,6 +23,7 @@ from .types import (
     OutputCallback,
     SessionConfig,
     SessionInfo,
+    validate_transport_encryption,
 )
 
 if TYPE_CHECKING:
@@ -303,25 +304,16 @@ def create_session(config: SessionConfig | None = None) -> Session:
         Session: a wrapper around the chosen KernelTransport.
 
     Raises:
-        ValueError: if config.mode == "server" but no server config provided.
+        ValueError: if server config is missing or launch options are incompatible.
     """
     if config is None:
         config = SessionConfig()
     if config.mode == "server":
+        validate_transport_encryption(config.transport_encryption, local=False)
         if not config.server:
             raise ValueError("Server mode requires a ServerConfig")
         transport = ServerTransport(config.server)
     else:
-        if config.connection_file_name and (
-            config.cwd is not None
-            or config.env is not None
-            or config.kernel_args
-            or config.transport_encryption != "disabled"
-        ):
-            raise ValueError(
-                "cwd, env, kernel_args, and transport_encryption only apply when "
-                "launching a local kernel"
-            )
         transport = LocalTransport(
             kernel_name=config.kernel_name,
             connection_file_name=config.connection_file_name,

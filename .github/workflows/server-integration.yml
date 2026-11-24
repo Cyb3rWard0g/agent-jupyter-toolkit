@@ -1,0 +1,96 @@
+name: Jupyter Server integration
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  server-smoke:
+    name: Test real Jupyter Server transport
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      JUPYTER_PATH: ${{ github.workspace }}/.venv/share/jupyter
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Derive the workspace version from tags in both callers.
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install integration dependencies
+        run: uv sync --locked --all-packages --all-extras --dev
+
+      - name: Check the Jupyter versions shared with the Docker examples
+        run: >-
+          uv run --no-sync python
+          packages/mcp-jupyter-notebook/quickstarts/jupyter/locked_stack.py
+          uv.lock --check-installed
+
+      - name: Bind the server kernel to the locked environment
+        run: |
+          uv run --no-sync python -m ipykernel install --sys-prefix --name python3
+          uv run --no-sync python - <<'PY' >> "$GITHUB_ENV"
+          import sys
+          print(f"JAT_SERVER_PYTHON={sys.executable}")
+          print(f"JAT_SERVER_PREFIX={sys.prefix}")
+          PY
+
+      - name: Start isolated Jupyter Server
+        run: |
+          mkdir -p "$RUNNER_TEMP/jat-server-root" "$RUNNER_TEMP/jat-jupyter-data"
+          JUPYTER_DATA_DIR="$RUNNER_TEMP/jat-jupyter-data" uv run --no-sync jupyter server \
+            --no-browser \
+            --IdentityProvider.token=jat-token \
+            --ServerApp.ip=127.0.0.1 \
+            --ServerApp.root_dir="$RUNNER_TEMP/jat-server-root" \
+            --ServerApp.port=8899 \
+            --ServerApp.port_retries=0 \
+            >"$RUNNER_TEMP/jat-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/jat-server.pid"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --max-time 2 "http://127.0.0.1:8899/api/status?token=jat-token" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/jat-server.log"
+          exit 1
+
+      - name: Check JupyterLab and kernelspec assets
+        run: |
+          curl --fail --silent --show-error --max-time 5 --output /dev/null \
+            "http://127.0.0.1:8899/lab?token=jat-token"
+          curl --fail --silent --show-error --max-time 5 --output /dev/null \
+            "http://127.0.0.1:8899/kernelspecs/python3/logo-32x32.png?token=jat-token"
+
+      - name: Run server, collaboration, and shared notebook MCP tests
+        timeout-minutes: 3
+        env:
+          JAT_SERVER_URL: http://127.0.0.1:8899
+          JAT_SERVER_TOKEN: jat-token
+          JAT_COLLAB_URL: http://127.0.0.1:8899
+          JAT_COLLAB_TOKEN: jat-token
+        run: |
+          uv run --no-sync pytest \
+            packages/agent-jupyter-toolkit/tests/test_transport_server_smoke.py \
+            packages/agent-jupyter-toolkit/tests/test_collaboration_server_smoke.py \
+            packages/mcp-jupyter-notebook/tests/integration/test_notebook_mcp.py::test_shared_mcp_import_survives_reconnect \
+            'packages/mcp-jupyter-notebook/tests/integration/test_notebook_mcp.py::test_saved_mcp_dataset_replays_without_source[server]' \
+            -vv -o faulthandler_timeout=30
+
+      - name: Stop Jupyter Server
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/jat-server.pid"; then
+            kill "$(cat "$RUNNER_TEMP/jat-server.pid")" || true
+          fi
+          cat "$RUNNER_TEMP/jat-server.log" || true

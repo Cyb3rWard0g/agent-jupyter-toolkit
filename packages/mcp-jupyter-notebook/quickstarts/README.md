@@ -107,6 +107,8 @@ docker compose up -d --build
 ```
 
 Opens JupyterLab at **http://localhost:8888** (token: `mcp-dev-token`).
+The image installs its Jupyter runtime from the repository's `uv.lock`, using
+the same versions as the server integration tests.
 
 > Want PostgreSQL too? Use the same Compose file with the `postgres` profile:
 >

@@ -58,7 +58,7 @@ def register_execution_tools(
             title="Re-run Existing Cell",
             read_only_hint=False,
             destructive_hint=True,
-            idempotent_hint=True,
+            idempotent_hint=False,
             open_world_hint=True,
         ),
     )

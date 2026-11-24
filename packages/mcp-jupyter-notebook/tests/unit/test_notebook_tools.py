@@ -77,8 +77,14 @@ def test_register_notebook_tools_registers_expected_tools(mcp_server):
         "notebook_variables_list",
         "notebook_variable_get",
         "notebook_variable_set",
+        "notebook_import_table",
     }
     assert expected.issubset(tool_names), f"Missing tools: {expected - tool_names}"
+
+
+def test_rerunning_existing_code_is_not_idempotent(mcp_server):
+    tool = mcp_server._tool_manager._tools["notebook_code_run_existing"]
+    assert tool.annotations.idempotent_hint is False
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,14 @@
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import zmq
 
-from agent_jupyter_toolkit.kernel import SessionConfig, create_session
+from agent_jupyter_toolkit.kernel import ServerConfig, SessionConfig, create_session
 from agent_jupyter_toolkit.kernel.manager import KernelManager
+from agent_jupyter_toolkit.notebook import NotebookWorkspaceConfig
+from agent_jupyter_toolkit.utils.factories import create_kernel
 
 pytestmark = pytest.mark.asyncio
 
@@ -28,6 +31,22 @@ async def test_attachment_rejects_launch_only_options(tmp_path):
                 cwd=str(tmp_path),
             )
         )
+
+
+async def test_server_entry_points_reject_local_encryption_policy():
+    base_url = "https://jupyter.example.test"
+    with pytest.raises(ValueError, match="transport_encryption.*local kernel"):
+        create_session(
+            SessionConfig(
+                mode="server",
+                server=ServerConfig(base_url=base_url),
+                transport_encryption="required",
+            )
+        )
+    with pytest.raises(ValueError, match="transport_encryption.*local kernel"):
+        create_kernel("remote", base_url=base_url, transport_encryption="required")
+    with pytest.raises(ValueError, match="transport_encryption.*local kernel"):
+        NotebookWorkspaceConfig(mode="server", base_url=base_url, transport_encryption="required")
 
 
 async def test_failed_attachment_clears_partial_client(tmp_path):
@@ -101,3 +120,28 @@ async def test_curve_auto_reports_negotiated_encryption():
     assert result.status == "ok"
     assert info.transport_encryption == "auto"
     assert info.encryption_enabled is True
+
+
+@pytest.mark.skipif(not zmq.has("curve"), reason="libzmq has no Curve support")
+async def test_curve_policy_for_kernelspec_without_encryption_marker(monkeypatch, tmp_path):
+    from ipykernel.kernelspec import get_kernel_dict
+
+    spec = get_kernel_dict()
+    spec["metadata"].pop("supported_encryption", None)
+    spec_dir = tmp_path / "kernels" / "unmarked-python"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "kernel.json").write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setenv("JUPYTER_PATH", str(tmp_path))
+
+    required = create_session(
+        SessionConfig(kernel_name="unmarked-python", transport_encryption="required")
+    )
+    with pytest.raises(RuntimeError, match="kernelspec does not declare"):
+        await required.start()
+    assert await required.is_alive() is False
+
+    async with create_session(
+        SessionConfig(kernel_name="unmarked-python", transport_encryption="auto")
+    ) as session:
+        assert (await session.execute("21 * 2", timeout=10)).status == "ok"
+        assert session.session_info().encryption_enabled is False

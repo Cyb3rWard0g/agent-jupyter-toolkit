@@ -11,6 +11,15 @@ from typing import Any, TypedDict
 
 # Type Aliases
 OutputCallback = Callable[[list[dict[str, Any]], int | None], Awaitable[None]]
+TRANSPORT_ENCRYPTION_MODES = ("disabled", "auto", "required")
+
+
+def validate_transport_encryption(policy: str, *, local: bool = True) -> None:
+    """Validate the CurveZMQ policy for a kernel launch."""
+    if policy not in TRANSPORT_ENCRYPTION_MODES:
+        raise ValueError("transport_encryption must be 'disabled', 'auto', or 'required'")
+    if not local and policy != "disabled":
+        raise ValueError("transport_encryption only applies when launching a local kernel")
 
 
 # Custom Exceptions
@@ -79,6 +88,7 @@ class SessionConfig:
                      as default when creating a server kernel/session unless overridden.
         connection_file_name: If provided in local mode, attach to an existing kernel.
         packer: Optional serializer name for jupyter_client.Session (e.g., "json", "orjson").
+        transport_encryption: Local CurveZMQ policy ("disabled", "auto", or "required").
         server: Required when mode == "server"; settings for remote Jupyter Server.
     """
 

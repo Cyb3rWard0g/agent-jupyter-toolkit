@@ -17,6 +17,8 @@ Or programmatically::
 import argparse
 import asyncio
 
+from agent_jupyter_toolkit.kernel.types import TRANSPORT_ENCRYPTION_MODES
+
 from .context import AppContext
 
 
@@ -46,9 +48,22 @@ def main() -> None:
         help="Kernel name (default: python3)",
     )
     parser.add_argument(
+        "--transport-encryption",
+        choices=TRANSPORT_ENCRYPTION_MODES,
+        help="CurveZMQ policy for local kernel channels (default: disabled)",
+    )
+    parser.add_argument(
         "--notebook-path",
         default=None,
         help="Notebook file path (default: auto-generated)",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        help="Private persistent directory for saved notebook datasets. Enables dataset tools.",
+    )
+    parser.add_argument(
+        "--kernel-dataset-root",
+        help="Absolute path to the same dataset storage from the kernel, if different.",
     )
     parser.add_argument(
         "--transport",

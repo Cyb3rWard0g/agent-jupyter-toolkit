@@ -12,7 +12,7 @@ from functools import lru_cache
 from inspect import Parameter, getdoc, signature
 from typing import Any, get_type_hints
 
-from pydantic import BaseModel, ConfigDict, create_model
+from pydantic import BaseModel, ConfigDict, JsonValue, create_model
 
 from ..kernel.variables import VariableManager
 from ..notebook import NotebookWorkspace
@@ -25,6 +25,7 @@ from ..utils import (
     invoke_markdown_cell,
 )
 from ._results import cell_id_for_index, enriched_code_result, normalize_source, summarize_cell
+from ._tables import import_table
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,32 @@ class NotebookActions:
         except Exception as exc:
             return {"ok": False, "name": name, "error": str(exc)}
 
+    async def import_table(
+        self,
+        notebook_path: str,
+        operation_id: str,
+        name: str,
+        columns: list[str],
+        rows: list[list[JsonValue]],
+        metadata: dict[str, JsonValue] | None = None,
+    ) -> dict[str, Any]:
+        """Import JSON rows into a pandas DataFrame in an open Python notebook.
+
+        Supply a unique operation ID. Identical retries in the same notebook and
+        live kernel return the original receipt. Conflicting requests and existing
+        variable names are rejected. Rows and receipts live in the kernel.
+        """
+        session = self.workspace.get(notebook_path)
+        return await import_table(
+            session.kernel,
+            self.workspace._session_key(notebook_path),
+            operation_id,
+            name,
+            columns,
+            rows,
+            metadata,
+        )
+
     @classmethod
     def definitions(cls) -> tuple[NotebookActionDefinition, ...]:
         """Return fresh descriptors; changing one cannot alter later catalogs."""
@@ -301,6 +328,7 @@ _ACTIONS = {
     "code_run": ("Run Code Cell", NotebookActions.code_run),
     "complete": ("Code Completion", NotebookActions.complete),
     "dependencies_list": ("List Tracked Dependencies", NotebookActions.dependencies_list),
+    "import_table": ("Import Table", NotebookActions.import_table),
     "inspect": ("Inspect Object", NotebookActions.inspect),
     "kernel_info": ("Kernel Info", NotebookActions.kernel_info),
     "list": ("List Open Notebooks", NotebookActions.list),

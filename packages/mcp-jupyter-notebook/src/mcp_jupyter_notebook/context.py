@@ -28,6 +28,9 @@ class SessionManager(NotebookWorkspace):
                 headers=config.get("headers"),
                 prefer_collab=config.get("prefer_collab", True),
                 collaboration_mode=config.get("collaboration_mode"),
+                transport_encryption=config.get("transport_encryption", "disabled"),
+                dataset_root=config.get("dataset_root"),
+                kernel_dataset_root=config.get("kernel_dataset_root"),
             ),
             default_path=default_path,
         )

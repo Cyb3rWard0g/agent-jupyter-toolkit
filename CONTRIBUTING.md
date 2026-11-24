@@ -76,7 +76,9 @@ uv run --locked --all-packages --all-extras pytest --tb=short -q
 and format checks. Server tests skip unless `JAT_SERVER_URL` and
 `JAT_SERVER_TOKEN` point to a test Jupyter Server. Collaboration tests use
 `JAT_COLLAB_URL` and `JAT_COLLAB_TOKEN` and require its collaboration extension.
-Use an isolated server root because these tests create notebooks and kernels.
+The shared notebook MCP test uses those settings to verify that an import can
+be retried after reconnecting to the same kernel. Use an isolated server root
+because these tests create notebooks and kernels.
 
 The MCP tox environment installs the toolkit as a local package dependency.
 After changing toolkit code, use `uv run tox -r -e mcp` to rebuild that environment
@@ -112,12 +114,13 @@ See [docs/architecture.md](docs/architecture.md) for the full design.
 
 ## CI / CD
 
-Two GitHub Actions workflows live in `.github/workflows/`:
+The GitHub Actions workflows live in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci.yml` | Push / PR to `main` | Lint/format, Python 3.11–3.13 tests, real server/collaboration, dependency resolution, extras, and local platform checks |
-| `release.yml` | Push a `v*` tag | Build → test → publish to PyPI → GitHub Release → Docker image |
+| `release.yml` | Push a `v*` tag | Build and verify both packages, run tests including the shared server suite, then publish to PyPI, GitHub Releases, and GHCR |
+| `server-integration.yml` | Called by CI and release | Test Jupyter Server, collaboration, and MCP import retries against the lockfile at the caller's commit |
 
 **Pushing to `main` never triggers a release.** Only pushing a version tag does.
 
@@ -125,8 +128,10 @@ Two GitHub Actions workflows live in `.github/workflows/`:
 
 ## Release Process
 
-Both packages share a **single version** derived from **git tags** via `hatch-vcs`.
-There is no hard-coded version anywhere — one tag drives both packages.
+Both release packages share a version derived from the same Git tag via
+`hatch-vcs`. The MCP package declares its minimum toolkit version in
+`packages/mcp-jupyter-notebook/pyproject.toml`. For untagged test builds, CI and
+tox supply a version that satisfies that dependency.
 
 > **Versioning note:** Both packages always release with the same version number.
 > This is intentional — `mcp-jupyter-notebook` depends on `agent-jupyter-toolkit`
@@ -170,7 +175,7 @@ git push origin vX.Y.Z
 
 This triggers the `release.yml` workflow which:
 1. Builds both packages (`python -m build`)
-2. Runs the full test matrix (Python 3.11–3.13)
+2. Runs the Python 3.11–3.13 test matrix and the live Jupyter Server and collaboration suite on the tagged commit
 3. Installs the built wheel pair and verifies their versions and workspace APIs
 4. Publishes `agent-jupyter-toolkit` to PyPI (via OIDC trusted publishing)
 5. Waits until that toolkit version is installable, then publishes `mcp-jupyter-notebook`

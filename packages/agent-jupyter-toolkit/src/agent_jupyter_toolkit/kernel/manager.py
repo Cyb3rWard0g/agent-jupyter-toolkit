@@ -12,7 +12,7 @@ from jupyter_client.asynchronous.client import AsyncKernelClient
 from jupyter_client.manager import AsyncKernelManager
 from jupyter_core.paths import jupyter_runtime_dir
 
-from .types import KernelError, UnsupportedKernelCapabilityError
+from .types import KernelError, UnsupportedKernelCapabilityError, validate_transport_encryption
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,7 @@ class KernelManager:
         self._cwd = cwd
         self._env = env
         self._kernel_args = list(kernel_args or [])
-        if transport_encryption not in {"disabled", "auto", "required"}:
-            raise ValueError("transport_encryption must be 'disabled', 'auto', or 'required'")
+        validate_transport_encryption(transport_encryption)
         self.transport_encryption = transport_encryption
         self._owns_kernel = False
 

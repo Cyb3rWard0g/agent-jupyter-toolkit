@@ -1,0 +1,5 @@
+**
+!uv.lock
+!packages/mcp-jupyter-notebook/quickstarts/jupyter/locked_stack.py
+!packages/mcp-jupyter-notebook/quickstarts/jupyter/requirements.txt
+!demos/postgresql-devicelogon/jupyter/requirements.txt

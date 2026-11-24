@@ -31,6 +31,7 @@ NAMES = {
     "variables_list",
     "variable_get",
     "variable_set",
+    "import_table",
 }
 
 
@@ -54,7 +55,7 @@ def test_action_import_and_catalog_do_not_import_mcp():
                 [
                     "import sys",
                     "from agent_jupyter_toolkit.actions import NotebookActions",
-                    "assert len(NotebookActions.definitions()) == 19",
+                    "assert len(NotebookActions.definitions()) == 20",
                     "assert not any(n == 'mcp' or n.startswith('mcp.') for n in sys.modules)",
                     "assert not any(n.startswith('mcp_jupyter_notebook') for n in sys.modules)",
                 ]
@@ -136,3 +137,54 @@ async def test_real_kernel_reuses_state_and_preserves_cell_ids(tmp_path):
         cell = await actions.invoke("cell_read_by_id", {"cell_id": second["cell_id"]})
         assert cell["cell"]["source"] == "print(answer * 2)"
         assert (await actions.invoke("variable_get", {"name": "answer"}))["value"] == 21
+
+
+@pytest.mark.asyncio
+async def test_table_import_replays_and_rejects_conflicts(tmp_path):
+    import asyncio
+
+    pytest.importorskip("pandas")
+    path = str(tmp_path / "imports.ipynb")
+    marker = "fixture with quotes ' and newline\n"
+    async with NotebookWorkspace() as workspace:
+        actions = NotebookActions(workspace)
+        await actions.open(path)
+        args = {
+            "notebook_path": path,
+            "operation_id": "operation-1",
+            "name": "alerts",
+            "columns": ["event", "number"],
+            "rows": [[marker, 2]],
+            "metadata": {"query_row_limit": 10},
+        }
+        first, retry = await asyncio.gather(
+            actions.invoke("import_table", args),
+            actions.invoke("import_table", args),
+        )
+        assert (
+            first
+            == retry
+            == {
+                "ok": True,
+                "table": "alerts",
+                "operation_id": "operation-1",
+                "row_count": 1,
+                "column_count": 2,
+            }
+        )
+        assert (await actions.invoke("import_table", {**args, "rows": [[None, 3]]}))[
+            "error_code"
+        ] == "operation_conflict"
+        assert (await actions.invoke("import_table", {**args, "operation_id": "different"}))[
+            "error_code"
+        ] == "name_conflict"
+        assert (await actions.invoke("import_table", {**args, "rows": [[None]]}))[
+            "error_code"
+        ] == "invalid_table_shape"
+        result = await workspace.get(path).kernel.execute(
+            "print(repr(alerts.iloc[0, 0]), alerts.attrs['notebook_import']['query_row_limit'])"
+        )
+        assert result.stdout.strip() == f"{marker!r} 10"
+        await workspace.get(path).kernel.execute("del alerts")
+        assert (await actions.invoke("import_table", args))["error_code"] == "table_unavailable"
+        assert marker not in (tmp_path / "imports.ipynb").read_text()

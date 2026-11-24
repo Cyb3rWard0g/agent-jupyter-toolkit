@@ -17,6 +17,26 @@ session = create_session(SessionConfig(
 ))
 ```
 
+#### Preview upstream ipykernel fixes
+
+Use a separate local kernelspec to exercise the upstream fixes for thread output
+attribution and cleanup after an IOPub port collision. The commit below contains
+both fixes and reports the same package version as the 7.4.0 release. Its
+kernelspec name identifies the preview.
+
+```sh
+UV_PROJECT_ENVIRONMENT=.venv/ipykernel-preview uv sync --locked \
+  --package agent-jupyter-toolkit --extra local --no-dev
+uv pip install --python .venv/ipykernel-preview/bin/python --no-deps \
+  'ipykernel @ git+https://github.com/ipython/ipykernel.git@7940a0972ab7c1521eb652e5cd8ea36d31d144d4'
+.venv/ipykernel-preview/bin/python -m ipykernel install --prefix "$PWD/.venv" \
+  --name python-ipykernel-preview --display-name 'Python (ipykernel preview)'
+```
+
+Select `kernel_name="python-ipykernel-preview"` in the SDK or launch the local
+MCP with `--kernel-name python-ipykernel-preview` from the workspace environment.
+The workspace lockfile selects the published release for regular installations.
+
 ### Remote kernel (Jupyter Server)
 
 ```python

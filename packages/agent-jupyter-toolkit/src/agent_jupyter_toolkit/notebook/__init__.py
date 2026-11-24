@@ -18,6 +18,7 @@ from . import utils
 from .batch import execute_notebook_batch
 from .buffer import NotebookBuffer
 from .cells import create_code_cell, create_markdown_cell
+from .datasets import NotebookDatasets
 from .factory import CollaborationMode, make_document_transport
 from .session import NotebookSession
 from .transport import NotebookDocumentTransport
@@ -42,6 +43,7 @@ __all__ = [
     "NotebookSession",
     "NotebookWorkspace",
     "NotebookWorkspaceConfig",
+    "NotebookDatasets",
     "NotebookBuffer",
     "create_code_cell",
     "create_markdown_cell",

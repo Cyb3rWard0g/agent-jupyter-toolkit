@@ -31,12 +31,22 @@ mcp-jupyter-notebook \
 Starts a local kernel process directly — no Jupyter server needed. The notebook is saved to the local filesystem.
 
 ```sh
+pip install "mcp-jupyter-notebook[local]"
 mcp-jupyter-notebook --mode local --kernel-name python3
 ```
 
-**Requirements:**
-- `ipykernel` installed in the environment
-- A kernel spec registered (e.g. `python3`)
+To require encrypted local kernel channels, start the server with:
+
+```sh
+mcp-jupyter-notebook --mode local --transport-encryption required
+```
+
+Both `required` and `auto` need a Curve-capable libzmq. `required` also refuses
+to launch kernelspecs that omit `curve` from `metadata.supported_encryption`.
+`auto` uses encryption for kernelspecs that advertise it. `notebook_session_info`
+reports the configured `transport_encryption` and whether `encryption_enabled`
+is active. This setting applies to local kernel channels. In server mode, use
+an HTTPS Jupyter base URL for HTTP and WebSocket transport encryption.
 
 ---
 
@@ -50,7 +60,10 @@ All configuration can be set via environment variables. This is the recommended 
 | `MCP_JUPYTER_BASE_URL` | Jupyter server URL (required in `server` mode) | — |
 | `MCP_JUPYTER_TOKEN` | Jupyter API token (required in `server` mode) | — |
 | `MCP_JUPYTER_KERNEL_NAME` | Kernel spec name | `python3` |
+| `MCP_JUPYTER_TRANSPORT_ENCRYPTION` | Local kernel CurveZMQ policy (`disabled`, `auto`, or `required`) | `disabled` |
 | `MCP_JUPYTER_NOTEBOOK_PATH` | Path for the notebook file (`.ipynb`). If omitted, a random name is generated (`mcp_<hash>.ipynb`) | auto-generated |
+| `MCP_JUPYTER_DATASET_ROOT` | Private persistent storage writable by the MCP server. Setting it enables the dataset tools | — |
+| `MCP_JUPYTER_KERNEL_DATASET_ROOT` | Absolute path to the same storage from the notebook kernel | MCP server's dataset root |
 | `MCP_JUPYTER_TRANSPORT` | MCP transport protocol | `stdio` |
 | `MCP_JUPYTER_HOST` | Bind host for HTTP transports | `127.0.0.1` |
 | `MCP_JUPYTER_PORT` | Bind port for HTTP transports | `8000` |
@@ -71,7 +84,10 @@ mcp-jupyter-notebook [OPTIONS]
   --base-url URL          Jupyter server URL
   --token TOKEN           Jupyter API token
   --kernel-name NAME      Kernel spec name (default: python3)
+  --transport-encryption  Local CurveZMQ policy: disabled | auto | required
   --notebook-path PATH    Notebook file path (.ipynb)
+  --dataset-root PATH     Enable saved datasets with this private persistent directory
+  --kernel-dataset-root PATH  Same dataset storage as seen by the kernel
   --transport TRANSPORT   stdio | sse | streamable-http
   --collaboration-mode    required | preferred | disabled
   --host HOST             Host for HTTP transports (default: 127.0.0.1)
@@ -85,7 +101,7 @@ CLI arguments override the equivalent environment variable when both are set.
 
 ## Optional Tool Sets
 
-The server always registers the notebook tools.
+The server registers the core notebook tools by default.
 
 To enable additional tool domains (for example PostgreSQL helper tools), set:
 
@@ -103,6 +119,49 @@ In **server mode**, the kernel runs on the **Jupyter server**, not inside the MC
 That means database environment variables (like `PG_DSN`) must be configured in the **Jupyter server/container environment** so kernels inherit them.
 
 Use the Docker Compose quickstart in `packages/mcp-jupyter-notebook/quickstarts/docker-compose.yml` with `docker compose --profile postgres` to get a working Postgres + Jupyter setup.
+
+---
+
+## Saved Notebook Datasets
+
+Install `mcp-jupyter-notebook[dataframe]` in the MCP server environment and
+pandas with PyArrow in the Python kernel. Set `MCP_JUPYTER_DATASET_ROOT` to a
+private persistent directory. Give the MCP server write access and the kernel
+read access through the same service identity or a private shared group. With
+multiple MCP processes, use a filesystem that supports shared file locks and
+atomic renames.
+
+When building the MCP server Docker image for this mode, pass
+`--build-arg MCP_INSTALL_EXTRAS=dataframe` along with its normal version build
+argument. The quickstart Jupyter image includes pandas and PyArrow for the
+kernel-side loader.
+
+In local mode, the writer and kernel usually see the same absolute path. If
+they use different mounts, configure both paths. For example, with the
+quickstart Compose Jupyter service and an MCP process on the host, run from
+`packages/mcp-jupyter-notebook/quickstarts` with these settings:
+
+```sh
+export MCP_JUPYTER_DATASET_ROOT="$PWD/jupyter/notebooks/datasets"
+export MCP_JUPYTER_KERNEL_DATASET_ROOT=/home/jovyan/work/datasets
+```
+
+The writer stores one Zstandard-compressed Parquet file at
+`<dataset-root>/<notebook-id>/<dataset-id>.parquet`. Jupyter records the notebook
+ID in its metadata, so a rename preserves its saved datasets. Each loader uses
+the kernel-visible mount path. Keep the `.ipynb` and its dataset directory for
+replay, and keep that mount path stable. Copies of the notebook that preserve
+its metadata reference the same saved datasets.
+
+Use a storage root scoped to the trusted notebook workspace. The service
+retains committed snapshots and keeps unfinished batches in `.pending` for
+retry. Include both in the workspace's retention policy. Remove abandoned
+staging directories after captures are no longer eligible for retry. Deleting
+a notebook file leaves its datasets on storage for that retention policy.
+
+The [`notebook_dataset_*` tools](tools.md#saved-notebook-datasets-optional)
+accept rows from a trusted caller. The caller still controls how it obtains
+source data. `notebook_import_table` remains available for in-memory imports.
 
 ---
 
